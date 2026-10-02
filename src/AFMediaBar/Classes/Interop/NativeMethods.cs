@@ -96,6 +96,13 @@ public static partial class NativeMethods
     public const int S_OK = 0;
     public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
+    // DWM 窗口描边。Windows 11 会给无边框窗口画一圈跟随系统强调色的细线（深色主题下常见为深绿），
+    // 传 DWMWA_COLOR_NONE 让 DWM 不再画它。
+    // DWM window border. Windows 11 draws a thin outline around frameless windows that follows the system accent
+    // color (often dark green in dark themes); DWMWA_COLOR_NONE tells DWM to stop drawing it.
+    public const int DWMWA_BORDER_COLOR = 34;
+    public const int DWMWA_COLOR_NONE = -1;
+
     // GDI region
     public const int RGN_OR = 2;
 
@@ -514,6 +521,10 @@ public static partial class NativeMethods
     /// <summary>读取 DWM 窗口属性。 / Reads a DWM window attribute.</summary>
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RECT value, int valueSize);
+
+    /// <summary>设置 DWM 窗口属性；用于取消 Windows 11 给无边框窗口画的系统色描边。 / Sets a DWM window attribute, used to drop the system-colored outline Windows 11 draws around frameless windows.</summary>
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int valueSize);
 
     [LibraryImport("gdi32.dll")]
     public static partial IntPtr CreateRectRgn(int left, int top, int right, int bottom);

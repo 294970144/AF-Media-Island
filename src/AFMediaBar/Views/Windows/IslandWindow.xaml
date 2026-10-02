@@ -6,72 +6,99 @@
         Width="340" Height="46" MinWidth="0" MinHeight="0"
         ShowInTaskbar="False" ShowActivated="False" Topmost="True"
         ResizeMode="NoResize" WindowStyle="None"
-        ExtendsContentIntoTitleBar="True"
         WindowStartupLocation="Manual" Background="Transparent"
         FontFamily="{DynamicResource AppTextFontFamily}"
         FontWeight="{DynamicResource AppTextFontWeight}"
-        Cursor="Hand">
+        Cursor="Arrow">
     <!--
-      实验性「灵动岛」：顶部悬浮胶囊（封面 + 当前行歌词 + 迷你频谱），点击胶囊就地长高成大面板。
-      Experimental floating island: a top capsule (cover + current lyric line + mini spectrum) that grows
-      in place into a full panel on click.
-      外观刻意走「桌面歌词」路线：胶囊底色固定深色半透明，文字固定浅色，不随主题反相——
+      ⚠ 不要加 ExtendsContentIntoTitleBar：岛体自绘全部外观，根本没有标题栏要延伸，而它会把 WindowStyle
+      强制成 SingleBorderWindow，并让 WPF-UI 在 OnActivated 时用系统强调色给窗口描一圈细边（深色主题下是深绿）。
+      代码里的 ClearSystemFrameBorder 是双保险，不是这条属性的替代品。
+      Do not add ExtendsContentIntoTitleBar back: the island paints all of its own chrome and has no title bar to
+      extend, while it forces WindowStyle to SingleBorderWindow and makes WPF-UI outline the window in the system
+      accent color on every activation (a thin dark green line on dark themes). ClearSystemFrameBorder in code is
+      belt-and-braces, not a replacement for dropping the attribute.
+
+      外观刻意走「桌面歌词」路线：底色固定深色半透明，文字固定浅色，不随主题反相——
       这与悬浮在任意壁纸/窗口上的使用场景一致，也和参考的网易云桌面歌词形态对齐。
-      ⚠️ MinWidth/MinHeight 必须显式置 0：WPF-UI 的 FluentWindow 隐式默认样式强制 MinWidth=460 / MinHeight=320，
+      ⚠ MinWidth/MinHeight 必须显式置 0：WPF-UI 的 FluentWindow 隐式默认样式强制 MinWidth=460 / MinHeight=320，
       不覆盖的话窗口实际尺寸永远被钳在 460×320，胶囊下面挂着一大块空窗，高度动画也完全失效。
       MinWidth/MinHeight must stay 0: the implicit FluentWindow style clamps windows to 460x320 minimum,
       which would leave a large empty frame below the capsule and completely defeat the height animation.
+      ⚠ 胶囊不响应拖拽，光标也用 Arrow 而非 Hand：位置固定由当前显示器工作区算出，
+      拖走的结果活不过一次隐藏（下次的显示仍会弹回顶部居中）。别暗示它可拖。
+      The capsule is deliberately not draggable and its cursor stays an Arrow rather than a Hand: the placement is
+      computed from the current display's work area, and a moved position would not survive the next hide. Nothing
+      should suggest it can be dragged.
+
+      ⚠ 形态是一块整体，不是两个胶囊拼接：外层 Shell 画唯一的底色与圆角，胶囊行与展开面板都透明地叠在它里面。
+      分成两个带圆角和底色的 Border 会在接缝处留下台阶与两段弧线，看起来像把两颗胶囊粘在一起；
+      圆角外壳由代码按当前形态内插（紧凑态 23、展开态 18），高度动画期间连续过渡。
+      The shape is one piece, not two stitched capsules: the outer Shell owns the only background and corner radius,
+      while the capsule row and the expanded panel sit transparently inside it. Two bordered-and-filled Borders left
+      a seam and two arcs at the joint, which read as two capsules glued together; the shell's radius is interpolated
+      in code between 23 (compact) and 18 (expanded) so it transitions with the height animation.
     -->
     <Grid>
-        <Border x:Name="Pill" Height="46" VerticalAlignment="Top"
-                Background="#E6222428" CornerRadius="23" Padding="7,0,12,0"
-                MouseLeftButtonDown="Pill_MouseLeftButtonDown"
-                MouseMove="Pill_MouseMove"
-                MouseLeftButtonUp="Pill_MouseLeftButtonUp">
+        <Border x:Name="Shell" Background="#E6222428" CornerRadius="23">
             <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <Border Width="34" Height="34" CornerRadius="17" ClipToBounds="True" Background="#22FFFFFF" VerticalAlignment="Center">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="46" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Border x:Name="Pill" Padding="7,0,12,0" Background="Transparent"
+                        MouseLeftButtonUp="Pill_MouseLeftButtonUp">
                     <Grid>
-                        <ui:SymbolIcon x:Name="CoverPlaceholder" Symbol="MusicNote220" FontSize="18" Foreground="#B3FFFFFF" />
-                        <Image x:Name="CoverImage" Stretch="UniformToFill" Visibility="Collapsed" />
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="34" Height="34" CornerRadius="17" ClipToBounds="True" Background="#22FFFFFF" VerticalAlignment="Center">
+                            <Grid>
+                                <ui:SymbolIcon x:Name="CoverPlaceholder" Symbol="MusicNote220" FontSize="18" Foreground="#B3FFFFFF" />
+                                <Image x:Name="CoverImage" Stretch="UniformToFill" Visibility="Collapsed" />
+                            </Grid>
+                        </Border>
+                        <!--
+                          歌词区裁剪：跑马灯推进时窗口字符串会宽于容器，ClipToBounds把溢出挡在胶囊内。
+                          TextTrimming 初始为 None，跑马灯不推进时由代码改回省略号——放得下时不该显示省略号。
+                        -->
+                        <Grid x:Name="PrimaryTextHost" Grid.Column="1" Margin="10,0,10,0" ClipToBounds="True">
+                            <TextBlock x:Name="PrimaryText" VerticalAlignment="Center"
+                                       FontSize="13" Foreground="#F2FFFFFF" TextTrimming="None" />
+                        </Grid>
+                        <Canvas x:Name="SpectrumCanvas" Grid.Column="2" Width="30" Height="16" VerticalAlignment="Center" />
                     </Grid>
                 </Border>
-                <TextBlock x:Name="PrimaryText" Grid.Column="1" Margin="10,0,10,0" VerticalAlignment="Center"
-                           FontSize="13" Foreground="#F2FFFFFF" TextTrimming="CharacterEllipsis" />
-                <Canvas x:Name="SpectrumCanvas" Grid.Column="2" Width="30" Height="16" VerticalAlignment="Center" />
-            </Grid>
-        </Border>
-        <Border x:Name="ExpandedPanel" Margin="0,46,0,0" Visibility="Collapsed"
-                Background="#E6222428" CornerRadius="18" Padding="20,14,20,14">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <Border Width="120" Height="120" CornerRadius="14" ClipToBounds="True" Background="#22FFFFFF" VerticalAlignment="Top">
-                    <Grid>
-                        <ui:SymbolIcon x:Name="ExpandedCoverPlaceholder" Symbol="MusicNote220" FontSize="44" Foreground="#66FFFFFF" />
-                        <Image x:Name="ExpandedCoverImage" Stretch="UniformToFill" Visibility="Collapsed" />
-                    </Grid>
-                </Border>
-                <StackPanel Grid.Column="1" Margin="18,2,2,2" VerticalAlignment="Center">
-                    <TextBlock x:Name="ExpandedTitleText" FontSize="19" FontWeight="SemiBold"
-                               Foreground="#F2FFFFFF" TextTrimming="CharacterEllipsis" />
-                    <TextBlock x:Name="ExpandedArtistText" Margin="0,5,0,0" FontSize="13" Opacity="0.72"
-                               Foreground="#F2FFFFFF" TextTrimming="CharacterEllipsis" />
-                    <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
-                        <Button x:Name="SkipPreviousButton" Click="OnSkipPreviousClick" Width="44" Height="36"
-                                Background="Transparent" Foreground="#F2FFFFFF" BorderThickness="0" FontFamily="Segoe UI Symbol" FontSize="15" Content="&#x23EE;" />
-                        <Button x:Name="PlayPauseButton" Click="OnPlayPauseClick" Width="52" Height="40" Margin="8,0"
-                                Background="#33FFFFFF" Foreground="#F2FFFFFF" BorderThickness="0" FontFamily="Segoe UI Symbol" FontSize="16" Content="&#x25B6;" />
-                        <Button x:Name="SkipNextButton" Click="OnSkipNextClick" Width="44" Height="36"
-                                Background="Transparent" Foreground="#F2FFFFFF" BorderThickness="0" FontFamily="Segoe UI Symbol" FontSize="15" Content="&#x23ED;" />
+
+                <Grid x:Name="ExpandedPanel" Grid.Row="1" Visibility="Collapsed" Margin="20,0,20,14">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Width="120" Height="120" CornerRadius="14" ClipToBounds="True" Background="#22FFFFFF" VerticalAlignment="Top">
+                        <Grid>
+                            <ui:SymbolIcon x:Name="ExpandedCoverPlaceholder" Symbol="MusicNote220" FontSize="44" Foreground="#66FFFFFF" />
+                            <Image x:Name="ExpandedCoverImage" Stretch="UniformToFill" Visibility="Collapsed" />
+                        </Grid>
+                    </Border>
+                    <StackPanel Grid.Column="1" Margin="18,2,2,2" VerticalAlignment="Center">
+                        <TextBlock x:Name="ExpandedTitleText" FontSize="19" FontWeight="SemiBold"
+                                   Foreground="#F2FFFFFF" TextTrimming="CharacterEllipsis" />
+                        <TextBlock x:Name="ExpandedArtistText" Margin="0,5,0,0" FontSize="13" Opacity="0.72"
+                                   Foreground="#F2FFFFFF" TextTrimming="CharacterEllipsis" />
+                        <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                            <Button x:Name="SkipPreviousButton" Click="OnSkipPreviousClick" Width="44" Height="36"
+                                    Background="Transparent" Foreground="#F2FFFFFF" BorderThickness="0" FontFamily="Segoe UI Symbol" FontSize="15" Content="&#x23EE;" />
+                            <Button x:Name="PlayPauseButton" Click="OnPlayPauseClick" Width="52" Height="40" Margin="8,0"
+                                    Background="#33FFFFFF" Foreground="#F2FFFFFF" BorderThickness="0" FontFamily="Segoe UI Symbol" FontSize="16" Content="&#x25B6;" />
+                            <Button x:Name="SkipNextButton" Click="OnSkipNextClick" Width="44" Height="36"
+                                    Background="Transparent" Foreground="#F2FFFFFF" BorderThickness="0" FontFamily="Segoe UI Symbol" FontSize="15" Content="&#x23ED;" />
+                        </StackPanel>
                     </StackPanel>
-                </StackPanel>
+                </Grid>
             </Grid>
         </Border>
     </Grid>

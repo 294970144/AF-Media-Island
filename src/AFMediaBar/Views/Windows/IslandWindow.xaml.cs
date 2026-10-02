@@ -4,7 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
+using System.Windows.Threading;
 using AFMediaBar.Classes.Interop;
 using AFMediaBar.Classes.Models;
 using AFMediaBar.Classes.Services;
@@ -22,35 +22,75 @@ namespace AFMediaBar.Views.Windows;
 /// </summary>
 public partial class IslandWindow : FluentWindow
 {
-    /// <summary>位移小于该阈值视为点击而不是拖拽。 / Movement below this threshold counts as a click, not a drag.</summary>
-    private const double DragThresholdDip = 4;
-
-    /// <summary>展开动画时长。 / Expand animation duration.</summary>
-    private static readonly TimeSpan ExpandDuration = TimeSpan.FromMilliseconds(260);
-
-    /// <summary>收起动画时长：比展开短一截，离场不拖沓。 / Collapse duration: shorter than expand so the exit feels snappy.</summary>
-    private static readonly TimeSpan CollapseDuration = TimeSpan.FromMilliseconds(190);
-
     /// <summary>频谱条静止时的最小缩放，对应「残桩」观感。 / Minimum bar scale at rest — the resting-stub look.</summary>
     private const double SpectrumBarMinimumScale = 0.08;
 
     /// <summary>紧凑态胶囊圆角半径（DIP），等于胶囊高度的一半。 / Compact capsule corner radius (DIP), half the capsule height.</summary>
     private const double CapsuleCornerRadiusDip = 23;
 
+    /// <summary>展开态圆角半径（DIP）：外壳不再是半圆端帽，退成一个更克制的圆角矩形。</summary>
+    private const double ExpandedCornerRadiusDip = 18;
+
     private readonly IslandWindowViewModel _viewModel;
     private readonly IDisplayMonitorService _displayMonitorService;
+    private readonly NativeMouseInputMonitor _mouseInputMonitor;
     private readonly List<(Border Bar, ScaleTransform Scale)> _spectrumBars = [];
-    private Point _dragStartPosition;
-    private Point _dragWindowOrigin;
-    private bool _dragMoved;
+
+    // 动效级别在窗口构造时解析一次即可：它只取决于系统动画开关、高对比度与渲染层级，
+    // 而这些在一次运行中不会变。每帧调ResolveCurrent 会去读渲染能力，代价不成比例。
+    // The motion level is resolved once at construction: it depends only on the system animation setting,
+    // high contrast and the rendering tier, none of which change while the app runs. Calling ResolveCurrent
+    // every frame would query the rendering capability for no benefit.
+    private readonly MotionProfile _motion;
+
+    // 展开/收起交给弹簧积分，歌词滚动与频谱共用同一条 16ms 帧节拍：多起一个高频计时器只会多一次调度。
+    // Expansion runs on a spring; lyric scrolling shares the 16 ms spectrum frame beat — a second high-frequency
+    // timer would only mean a second dispatch.
+    private readonly DispatcherTimer _frameTimer;
+    private readonly IslandMarqueeState _marquee = new();
+    private readonly IslandHoverPolicy _hover = new();
+    private readonly IslandVisibilityPolicy _visibility = new();
+
+    // 全屏与无播放都要主动发现状态变化，而 IDisplayMonitorService 只提供拉取式快照、没有事件源，
+    // 所以用一个低频探针去问。频率取 450ms：全屏切换与人是否还在听歌本来就是秒级事件，
+    // 问得更勤只是白调度；帧节拍（16ms）留给弹簧与跑马灯，不混用。
+    // Neither fullscreen nor "nothing is playing" announces itself, and IDisplayMonitorService only offers pull-style
+    // snapshots with no event source, so a low-frequency probe asks. 450 ms is deliberate: fullscreen transitions and
+    // whether the user still listens are second-scale events, and asking more often only burns dispatches. The 16 ms
+    // beat stays with the spring and the marquee.
+    private static readonly TimeSpan PresenceProbeInterval = TimeSpan.FromMilliseconds(450);
+
+    private readonly DispatcherTimer _presenceProbe;
+    private DateTimeOffset _lastHoverSampleAt = DateTimeOffset.MinValue;
+
+    // Wpf.Ui.Controls 与 System.Windows.Media 都有同名变换类型，此处显式限定取系统那一个。
+    // Both Wpf.Ui.Controls and System.Windows.Media declare transforms of the same name; qualify the system one.
+    private readonly System.Windows.Media.TranslateTransform _marqueeTransform = new();
+    private readonly SpringMotion _heightSpring;
+    private DateTimeOffset _lastFrameAt = DateTimeOffset.MinValue;
+    private double[]? _marqueePrefixWidths;
+    private int _marqueeMeasuredCharacters;
+    private string _marqueeMeasuredFont = string.Empty;
     private bool _isExpanded;
+    private double _lastShellRadius = CapsuleCornerRadiusDip;
 
     /// <summary>创建岛体窗口并接通外观、显示器与状态源。 / Creates the island window and wires appearance, monitors, and state.</summary>
-    public IslandWindow(IslandWindowViewModel viewModel, WindowAppearanceService appearanceService, IDisplayMonitorService displayMonitorService)
+    public IslandWindow(
+        IslandWindowViewModel viewModel,
+        WindowAppearanceService appearanceService,
+        IDisplayMonitorService displayMonitorService,
+        NativeMouseInputMonitor mouseInputMonitor)
     {
         InitializeComponent();
         _viewModel = viewModel;
         _displayMonitorService = displayMonitorService;
+        _mouseInputMonitor = mouseInputMonitor;
+        _motion = MotionPolicy.ResolveCurrent();
+        // 构造阶段窗口还没布局，ActualHeight 通常是 0；用 XAML 写死的紧凑态高度起步，
+        // ShowIsland 会再跟实际高度对齐一次。
+        // The window has no layout yet during construction, so ActualHeight is usually 0: start from the compact
+        // height declared in XAML, and let ShowIsland re-sync against the real height.
+        _heightSpring = SpringMotion.ForProfile(_motion, IslandPlacementPolicy.CompactHeightDip);
 
         // 岛体悬浮在桌面与全屏内容之上，绝不能抢焦点：与曲目通知窗口同一套非激活窗口处理。
         // The island floats above the desktop and must never steal focus: same non-activating treatment as the
@@ -59,20 +99,55 @@ public partial class IslandWindow : FluentWindow
         appearanceService.AttachNonActivatingTransient(this);
         DataContext = viewModel;
 
+        // 跑马灯的小数位移挂在渲染变换上：滚动期间文本本身不重排，只有位移在变。
+        // The marquee's fractional offset rides on a render transform: the text is never re-laid out while scrolling.
+        PrimaryText.RenderTransform = _marqueeTransform;
+        PrimaryText.TextTrimming = TextTrimming.None;
+
         BuildSpectrumBars();
         viewModel.PropertyChanged += ViewModel_PropertyChanged;
         viewModel.SpectrumFrame += OnSpectrumFrame;
         RefreshMediaVisuals();
 
-        // 非 layered 窗口没有 AllowsTransparency 可用，胶囊轮廓用 GDI 圆角区域裁出：
-        // 尺寸一变（含展开高度动画的每一帧）就重设一次区域，半径跟随高度内插。
-        // Without AllowsTransparency the capsule silhouette is clipped by a GDI round region,
-        // reapplied on every size change (including each frame of the expand animation).
-        SourceInitialized += (_, _) => ApplyCapsuleRegion();
+        _frameTimer = new DispatcherTimer(DispatcherPriority.Render)
+        {
+            Interval = TimeSpan.FromMilliseconds(IslandMarqueeState.FrameIntervalMilliseconds)
+        };
+        _frameTimer.Tick += OnFrameTick;
+        _lastFrameAt = DateTimeOffset.UtcNow;
+
+        // 悬停与可见性探针共用帧节拍之外的单条低频计时器：帧节拍空闲时会停表，而这两种判定不能停。
+        // The hover dwell and the presence probe share one low-frequency timer apart from the frame beat: the beat
+        // stops when idle, while these two decisions must keep running.
+        _presenceProbe = new DispatcherTimer(DispatcherPriority.Background) { Interval = PresenceProbeInterval };
+        _presenceProbe.Tick += OnPresenceProbeTick;
+        _lastHoverSampleAt = DateTimeOffset.UtcNow;
+
+        // 「点别处收起」靠全局鼠标钩子：岛体是 no-activate 窗口，永远拿不到焦点事件，Deactivated 永不触发。
+        // 钩子服务是单例常驻的（托盘滚轮已在用），这里只是多订阅一个事件，不新增钩子线程。
+        // "Collapse on an outside click" rides the global mouse hook: the island is a no-activate window that never
+        // takes focus, so Deactivated never fires. The hook service is an app-wide singleton already running for the
+        // tray wheel, so this only adds one more subscription and no extra hook thread.
+        _mouseInputMonitor.LeftButtonPressed += OnGlobalLeftButtonPressed;
+
+        // 非 layered 窗口没有 AllowsTransparency 可用，外壳轮廓用 GDI 圆角区域裁出：
+        // 尺寸一变（含展开高度动画的每一帧）就重设一次区域，半径跟随形态内插。
+        // Without AllowsTransparency the shell silhouette is clipped by a GDI round region, reapplied on every size
+        // change (including each frame of the expand animation) with a radius interpolated across the two shapes.
+        SourceInitialized += (_, _) =>
+        {
+            ApplyCapsuleRegion();
+            ClearSystemFrameBorder();
+        };
         SizeChanged += (_, _) => ApplyCapsuleRegion();
 
         Closed += (_, _) =>
         {
+            _frameTimer.Stop();
+            _frameTimer.Tick -= OnFrameTick;
+            _presenceProbe.Stop();
+            _presenceProbe.Tick -= OnPresenceProbeTick;
+            _mouseInputMonitor.LeftButtonPressed -= OnGlobalLeftButtonPressed;
             _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
             _viewModel.SpectrumFrame -= OnSpectrumFrame;
             _viewModel.Detach();
@@ -85,8 +160,24 @@ public partial class IslandWindow : FluentWindow
         // TODO(prototype): 生命周期调试日志，正式发布前随本注释一并移除。 / Lifecycle debug logging; remove before release.
         AppLogService.Current?.Info("Island", $"显示岛体 / showing island at ({Left:F0},{Top:F0}) h={Height:F0}");
         ApplyPlacement(IslandPlacementPolicy.CompactHeightDip);
+        // 此刻窗口才刚布局完，真实高度才可信：把弹簧起点校准到它，再开始跑。
+        // Only now is the window laid out and its real height trustworthy: align the spring's origin before rolling.
+        Height = IslandPlacementPolicy.CompactHeightDip;
+        _heightSpring.ResetTo(Height);
+        // 重新显示时把两个策略复位：上一轮残留的锁定与隐藏结论不该带进新一轮。
+        // Both policies reset on re-show: a leftover pin or hide verdict from last time must not carry over.
+        _hover.Reset();
+        _visibility.Reset();
         _viewModel.Start();
         Show();
+        // 重新显示后再擦一次系统色描边：隐藏期间系统可能重建了非客户区，Show() 本身也可能触发激活路径。
+        // Wipe the system outline again after re-showing: the system may have rebuilt the non-client frame while the
+        // window was hidden, and Show() itself can run the activation path.
+        ClearSystemFrameBorder();
+        // 歌词可能一上来就超宽，起帧节拍让跑马灯立即有机会滚动。
+        // The lyric may already be too wide, so start the beat to let the marquee scroll right away.
+        StartFrameTimer();
+        StartPresenceProbe();
     }
 
     /// <summary>隐藏岛体并停掉状态源；窗口实例保留，供显示模式页或协调器再次唤起。 / Hides the island and stops its state source; the instance stays alive for re-showing.</summary>
@@ -96,15 +187,61 @@ public partial class IslandWindow : FluentWindow
         AppLogService.Current?.Info("Island", "隐藏岛体 / hiding island");
         Hide();
         _viewModel.Stop();
+        // 隐藏后没有任何东西需要推进，停表省掉后台 60Hz 空转（窗口只是 Hide，Dispatcher 仍在跑）。
+        // Nothing needs advancing while hidden: stop the beat so it does not spin at 60 Hz behind a hidden window.
+        _frameTimer.Stop();
+        _presenceProbe.Stop();
     }
 
     /// <summary>
-    /// 用 GDI 圆角矩形区域把窗口裁成胶囊/圆角面板轮廓。半径取「23 DIP 与高度一半的较小者」：
-    /// 紧凑态（46 DIP）正好是半圆端帽，展开态退化为 23 DIP 圆角的矩形。
+    /// 低频探针的一拍：先判可见性（无播放 / 前台全屏则整个藏起来），再喂悬停停留计时。
+    /// A presence probe tick: it first settles visibility (tuck away entirely when nothing plays or the foreground is
+    /// fullscreen), then feeds the hover dwell timing.
+    /// </summary>
+    private void OnPresenceProbeTick(object? sender, EventArgs e)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var elapsed = now - _lastHoverSampleAt;
+        _lastHoverSampleAt = now;
+
+        // 可见性要在悬停之前判：窗口被藏起来时，悬停状态已经没有意义了。
+        // Visibility comes before hover: once the window is tucked away, hover state is meaningless.
+        _visibility.Update(_viewModel.IsConnected, _displayMonitorService.IsForegroundWindowFullscreen());
+        if (_visibility.IsHidden)
+        {
+            // 藏起来时顺手把锁定解开，否则用户回来后岛体会莫名其妙停在展开态。
+            // Drop the pin while hidden, otherwise the island reappears stuck open for no visible reason.
+            _hover.Reset();
+            if (IsVisible)
+                Hide();
+            return;
+        }
+
+        if (!IsVisible)
+        {
+            Show();
+            // 重新显示后高度得重新校准，否则弹簧会拿隐藏前的目标继续跑。
+            // Re-align the height after re-showing, or the spring would keep chasing its pre-hide target.
+            Height = IslandPlacementPolicy.CompactHeightDip;
+            _heightSpring.ResetTo(Height);
+        }
+
+        // 形态只有一个写入者：按悬停策略给出的目标态设定，绝不自己取反。
+        // The shape has exactly one writer: it is set from the hover policy's target and never inverted here.
+        _hover.Update(IsMouseOver, elapsed);
+        SetExpanded(_hover.ShouldExpand);
+    }
+
+    /// <summary>
+    /// 用 GDI 圆角矩形区域把窗口裁成外壳轮廓。半径取「目标形态半径与高度一半的较小者」：紧凑态
+    /// （46 DIP，23 DIP 半径）正好是半圆端帽，展开态退化为 18 DIP 圆角的矩形。
+    /// 半径必须与 <see cref="Shell"/> 的 XAML 圆角一致，否则 WPF 画出的圆角会被 GDI 区域切出台阶。
     /// set 成功后区域归系统所有，旧区域由系统释放，这里不做任何 DeleteObject。
-    /// Clips the window to a capsule / rounded-panel silhouette with a GDI round region. The radius is the
-    /// smaller of 23 DIP and half the height: a half-circle cap when compact (46 DIP), a 23 DIP rounded
-    /// rectangle when expanded. After a successful set the region belongs to the system — never DeleteObject it here.
+    /// Clips the window to the shell silhouette with a GDI round region. The radius is the smaller of the target
+    /// shape's radius and half the height: a half-circle cap when compact (46 DIP at 23 DIP), a 18 DIP rounded
+    /// rectangle when expanded. It must match the XAML radius on <see cref="Shell"/>, or the GDI region cuts
+    /// steps into the corners WPF painted. After a successful set the region belongs to the system — never
+    /// DeleteObject it here.
     /// </summary>
     private void ApplyCapsuleRegion()
     {
@@ -116,14 +253,63 @@ public partial class IslandWindow : FluentWindow
         // TODO(prototype): 调试日志，正式发布前移除。 / Debug logging; remove before release.
         AppLogService.Current?.Verbose("Island", $"重设窗口区域 / reapply region {ActualWidth:F0}x{ActualHeight:F0}");
 
+        // 动画期间按弹簧进度在两种圆角之间插值，否则收起/展开时轮廓会在最后一帧突然换形状。
+        // 与 Shell 的 XAML 圆角共用同一计算，两处才不会错位。
+        // Interpolating between the two radii along the spring progress avoids the outline snapping to a new shape
+        // on the animation's last frame. Shell's XAML radius reads the same computation so the two never drift.
+        var radiusDip = ResolveShellRadiusDip();
+
         var dpi = VisualTreeHelper.GetDpi(this);
         var widthPx = (int)Math.Ceiling(ActualWidth * dpi.PixelsPerDip);
         var heightPx = (int)Math.Ceiling(ActualHeight * dpi.PixelsPerDip);
-        var radiusPx = (int)Math.Ceiling(Math.Min(CapsuleCornerRadiusDip, ActualHeight / 2) * dpi.PixelsPerDip);
+        var radiusPx = (int)Math.Ceiling(Math.Min(radiusDip, ActualHeight / 2) * dpi.PixelsPerDip);
         var region = NativeMethods.CreateRoundRectRgn(0, 0, widthPx + 1, heightPx + 1, radiusPx, radiusPx);
         if (region == nint.Zero)
             return;
         NativeMethods.SetWindowRgn(source.Handle, region, true);
+    }
+
+    /// <summary>
+    /// 窗口激活后再次取消系统色描边。
+    /// WPF-UI 的 <see cref="FluentWindow.OnActivated"/> 会调 <c>ApplyBorderColor(SystemAccent)</c> 把那条线刷回来，
+    /// 所以只在 <c>SourceInitialized</c> 清一次不够——窗口一被点击激活，绿线就重新出现。必须在基类刷完之后再擦一次。
+    /// <c>WS_EX_NOACTIVATE</c> 只保证岛体不抢焦点，并不保证 <c>IsActive</c> 恒为 false，所以这条路径真的会走到。
+    /// Clears the system-colored outline again after activation. WPF-UI's <see cref="FluentWindow.OnActivated"/> calls
+    /// <c>ApplyBorderColor(SystemAccent)</c> and puts the line back, so clearing once at
+    /// <c>SourceInitialized</c> is not enough: the moment the window is activated by a click, the line returns.
+    /// It has to be wiped after the base class paints it. <c>WS_EX_NOACTIVATE</c> only keeps the island from stealing
+    /// focus; it does not keep <c>IsActive</c> permanently false, so this path is genuinely reachable.
+    /// </summary>
+    protected override void OnActivated(EventArgs e)
+    {
+        base.OnActivated(e);
+        ClearSystemFrameBorder();
+    }
+
+    /// <summary>
+    /// 取消 Windows 11 给无边框窗口画的系统色描边。那条线画在窗口外框（非客户区）上，颜色跟着系统强调色走，
+    /// 深色主题下就是你看到的那圈深绿细线——它不在 WPF 视觉树里，改主题资源或 XAML 样式都去不掉。
+    /// 现在 XAML 已不再设 <c>ExtendsContentIntoTitleBar</c>（岛体自绘标题栏，用不着它，而它会把 WindowStyle
+    /// 强制成 SingleBorderWindow 并带来这条线），所以这里是双保险：万一某个系统仍画了，DWMWA_COLOR_NONE 能擦掉。
+    /// 让 DWM 不再画（DWMWA_COLOR_NONE）就干净了。失败也不影响使用，只是留着那条线。
+    /// Drops the system-colored outline Windows 11 draws around frameless windows. It lives on the non-client frame
+    /// and follows the system accent color, which is the thin dark green line on dark themes. It is not in the WPF
+    /// visual tree, so no theme resource or XAML style can remove it. The XAML no longer sets
+    /// <c>ExtendsContentIntoTitleBar</c> — the island paints its own chrome and never needed it, while it forced
+    /// WindowStyle to SingleBorderWindow and brought the line along — so this is now belt-and-braces: should any
+    /// system still paint it, DWMWA_COLOR_NONE wipes it. A failure here is harmless and only keeps the line.
+    /// </summary>
+    private void ClearSystemFrameBorder()
+    {
+        if (PresentationSource.FromVisual(this) is not HwndSource source || source.Handle == nint.Zero)
+            return;
+
+        var none = NativeMethods.DWMWA_COLOR_NONE;
+        // DwmSetWindowAttribute 失败只表示这台系统不支持该属性，不抛异常：外观问题不该影响功能。
+        // A failure only means this system does not support the attribute, so it is swallowed: cosmetics must
+        // never break the island.
+        NativeMethods.DwmSetWindowAttribute(
+            source.Handle, NativeMethods.DWMWA_BORDER_COLOR, ref none, sizeof(int));
     }
 
     private void ApplyPlacement(double heightDip)
@@ -138,11 +324,59 @@ public partial class IslandWindow : FluentWindow
         Top = topLeft.Y;
     }
 
-    /// <summary>解析岛体所在显示器：优先主屏，缺失时回退到首个可用显示器。 / Resolves the target monitor: primary first, then the first available.</summary>
+    /// <summary>
+    /// 解析岛体所在显示器：按窗口当前占据的位置反查，命中不了才回退主屏、再回首屏。
+    /// 早先固定取主屏，岛体被拖到副屏后夹取又按主屏工作区把它拽回去，跨屏拖拽因此是坏的。
+    /// Resolves the display the island sits on by looking up where the window currently is, falling back to the
+    /// primary and then the first display. It used to always take the primary, which broke cross-screen dragging
+    /// because the clamp kept pulling the island back into the primary work area.
+    /// </summary>
     private DisplayMonitorInfo? ResolveMonitor()
     {
-        var monitors = _displayMonitorService.GetMonitors();
-        return monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors.FirstOrDefault();
+        var monitors = RefreshedMonitors();
+        var (dpiX, dpiY) = CurrentWindowDpi();
+        return IslandMonitorPolicy.ResolveByWindow(
+            monitors, new Point(Left, Top), new Size(IslandPlacementPolicy.CompactWidthDip, ActualHeight), dpiX, dpiY);
+    }
+
+    /// <summary>刷新显示器快照。 / Refreshes the display snapshot.</summary>
+    private IReadOnlyList<DisplayMonitorInfo> RefreshedMonitors()
+    {
+        _displayMonitorService.Refresh();
+        return _displayMonitorService.GetMonitors();
+    }
+
+    /// <summary>
+    /// 窗口当前的 DPI。布局策略约定「窗口 Left/Top 是 DIP、显示器快照是物理像素」，拿错缩放会把
+    /// DIP 坐标算到另一块屏上去，所以这里只认窗口自己的 DPI——系统在窗口跨屏时经 WM_DPICHANGED 更新它。
+    /// 窗口尚未创建 HWND、没有 DPI 上下文时退到主屏，避免用 0 缩放把坐标算飞。
+    /// The window's current DPI. The placement policy assumes "window Left/Top are DIP while display snapshots are
+    /// physical pixels", so only the window's own DPI is trusted here: the system updates it via WM_DPICHANGED when
+    /// the window crosses screens. Before the HWND exists there is no DPI context, so it falls back to the primary.
+    /// </summary>
+    private (uint DpiX, uint DpiY) CurrentWindowDpi()
+    {
+        if (PresentationSource.FromVisual(this) is not null)
+        {
+            var dpi = VisualTreeHelper.GetDpi(this);
+            var x = (uint)Math.Round(dpi.DpiScaleX * 96d);
+            var y = (uint)Math.Round(dpi.DpiScaleY * 96d);
+            if (x > 0u && y > 0u)
+                return (x, y);
+        }
+
+        var fallback = PrimaryDisplayDpi();
+        return (fallback, fallback);
+    }
+
+    private uint PrimaryDisplayDpi()
+    {
+        foreach (var monitor in RefreshedMonitors())
+        {
+            if (monitor.IsPrimary)
+                return monitor.DpiX;
+        }
+        return 96u;
     }
 
     private void BuildSpectrumBars()
@@ -200,7 +434,11 @@ public partial class IslandWindow : FluentWindow
         CoverPlaceholder.Visibility = artwork is null ? Visibility.Visible : Visibility.Collapsed;
         ExpandedCoverPlaceholder.Visibility = artwork is null ? Visibility.Visible : Visibility.Collapsed;
 
-        PrimaryText.Text = _viewModel.PrimaryText;
+        // 歌词交给跑马灯状态源：换行即复位并重走起读停留。
+        // The lyric goes through the marquee state: a new line resets it and repeats the lead-in pause.
+        _marquee.Base = _viewModel.PrimaryText;
+        if (!_marquee.Advancing)
+            PrimaryText.Text = _viewModel.PrimaryText;
         ExpandedTitleText.Text = snapshot.IsConnected ? snapshot.Title : string.Empty;
         ExpandedArtistText.Text = snapshot.IsConnected ? snapshot.Artist : string.Empty;
         PlayPauseButton.Content = _viewModel.IsPlaying ? "\u23F8" : "\u25B6";
@@ -210,111 +448,333 @@ public partial class IslandWindow : FluentWindow
         Opacity = _viewModel.IsConnected ? 1 : 0.45;
     }
 
-    private void Pill_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-    {
-        _dragStartPosition = e.GetPosition(this);
-        _dragWindowOrigin = new Point(Left, Top);
-        _dragMoved = false;
-        Pill.CaptureMouse();
-    }
-
-    private void Pill_MouseMove(object sender, MouseEventArgs e)
-    {
-        if (!Pill.IsMouseCaptured)
-            return;
-        var position = e.GetPosition(this);
-        var delta = position - _dragStartPosition;
-        if (!_dragMoved && Math.Abs(delta.X) < DragThresholdDip && Math.Abs(delta.Y) < DragThresholdDip)
-            return;
-        _dragMoved = true;
-        Left = _dragWindowOrigin.X + delta.X;
-        Top = _dragWindowOrigin.Y + delta.Y;
-    }
-
+    /// <summary>
+    /// 点击胶囊：锁定展开态，指针移开也不收起，再点一次解锁收起。
+    /// 岛体不做拖动：它顶部居中的位置本来就是按当前显示器工作区算出来的，拖到别处的结果活不过一次
+    /// 隐藏（下次显示仍会弹回顶部居中），而基于窗口相对坐标的拖拽会形成自激反馈——窗口一动，坐标系跟着
+    /// 动，下一帧的位移基准又变了，表现为持续抽搐。
+    /// Clicking the capsule pins the expansion so moving away does not collapse it, and clicking again releases it.
+    /// The island is not draggable: its top-center placement is computed from the current display's work area, so
+    /// a moved position would not survive the next hide (showing always re-centers it at the top), and a drag
+    /// based on window-relative coordinates feeds back on itself — moving the window moves the coordinate system,
+    /// which changes the next frame's baseline, showing up as continuous jitter.
+    /// </summary>
     private void Pill_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
-        if (Pill.IsMouseCaptured)
-            Pill.ReleaseMouseCapture();
-
-        // 拖完顺手把落点夹回工作区；没拖动则视为点击，切换展开态。
-        // Clamp the landing point back into the work area; a non-drag release counts as a click and toggles expansion.
-        var monitor = ResolveMonitor();
-        if (_dragMoved)
-        {
-            if (monitor is not null)
-            {
-                var clamped = IslandPlacementPolicy.ClampWithinWorkArea(
-                    new Point(Left, Top),
-                    new Size(IslandPlacementPolicy.CompactWidthDip, ActualHeight),
-                    monitor.WorkArea, monitor.DpiX, monitor.DpiY);
-                Left = clamped.X;
-                Top = clamped.Y;
-            }
-            return;
-        }
-        ToggleExpanded(monitor);
+        _hover.TogglePin();
+        SetExpanded(_hover.ShouldExpand);
     }
 
-    /// <summary>就地长高/收回：高度动画走窗口本身，顶边保持不动，因此展开向下生长，符合顶部岛体的直觉。 / Grows or collapses in place: the window animates its own height while the top edge stays put.</summary>
-    private void ToggleExpanded(DisplayMonitorInfo? monitor)
+    /// <summary>
+    /// 每帧推进：先积分弹簧高度，再推一帧歌词滚动。两件事都只在需要时才有开销。
+    /// Advances one frame: integrates the height spring first, then nudges the lyric marquee.
+    /// </summary>
+    private void OnFrameTick(object? sender, EventArgs e) => OnFrame();
+
+    /// <summary>
+    /// 每帧推进：先积分弹簧高度，再推一帧歌词滚动。两者都静止时顺手停掉帧节拍。
+    /// Advances one frame: integrates the height spring first, then nudges the lyric marquee, and idles the beat once both are at rest.
+    /// </summary>
+    private void OnFrame()
     {
-        // 进入本方法时 _isExpanded 描述的是「当前」状态：true 表示正在展开、即将收起。
-        // On entry _isExpanded describes the current state: true means expanded and about to collapse.
-        var collapsing = _isExpanded;
-        var targetHeight = collapsing
-            ? IslandPlacementPolicy.CompactHeightDip
-            : IslandPlacementPolicy.ResolveExpandedHeight(
-                monitor?.WorkArea ?? Rect.Empty, monitor?.DpiX ?? 0, monitor?.DpiY ?? 0);
+        var now = DateTimeOffset.UtcNow;
+        var elapsed = now - _lastFrameAt;
+        _lastFrameAt = now;
+
+        if (!_heightSpring.IsSettled)
+        {
+            _heightSpring.Advance(elapsed);
+            // 弹簧可能过冲到目标之上，窗口高度永远不许为负：下界钉在紧凑态高度。
+            // The spring may overshoot past its target, but a window height is never allowed to go negative.
+            Height = Math.Max(IslandPlacementPolicy.CompactHeightDip, _heightSpring.Position);
+
+            // 面板透明度跟着弹簧进度走：展开时内容随高度浮现，收起时先隐再缩。
+            // Panel opacity rides the spring's progress so content appears with the growth and leaves before the shrink.
+            ExpandedPanel.Opacity = Math.Clamp(_heightSpring.Progress, 0d, 1d);
+
+            if (_heightSpring.IsSettled)
+                CompleteExpansion();
+        }
+
+        // 外壳圆角与 GDI 区域半径同步跟进，否则 WPF 画的圆角和窗口裁剪轮廓会在动画中错位。
+        // The shell's XAML radius tracks the same interpolation, or WPF's painted corners drift out of step with
+        // the window's clipping region mid-animation.
+        SyncShellCornerRadius();
+
+        AdvanceMarquee(elapsed);
+        StopFrameTimerIfIdle();
+    }
+
+    /// <summary>
+    /// 让 <see cref="Shell"/> 的圆角跟 GDI 区域用同一个半径。两处必须一致：XAML 圆角决定 WPF 画出来的
+    /// 弧线，窗口区域决定 HWND 真正被裁成什么形状，不一致就会在四角看到台阶。
+    /// Keeps <see cref="Shell"/>'s XAML radius identical to the GDI region radius. The two must agree: the XAML
+    /// radius paints the arc while the window region clips the HWND, and a mismatch shows as steps in the corners.
+    /// </summary>
+    private void SyncShellCornerRadius()
+    {
+        var radius = ResolveShellRadiusDip();
+        if (Math.Abs(radius - _lastShellRadius) < 0.05)
+            return;
+
+        _lastShellRadius = radius;
+        Shell.CornerRadius = new CornerRadius(radius);
+    }
+
+    /// <summary>
+    /// 当前形态该用的圆角半径（DIP）：运动中按弹簧进度在紧凑态与展开态之间插值，静止时取形态的定值。
+    /// 插值避免收起/展开的最后一帧突然换形状，而窗口区域与 XAML 圆角共用这个结果。
+    /// The corner radius the current shape wants (DIP): interpolated along the spring progress while moving, and
+    /// the shape's fixed value at rest. Interpolating avoids a snap on the animation's last frame, and both the
+    /// window region and the XAML radius read this one result.
+    /// </summary>
+    private double ResolveShellRadiusDip()
+    {
+        var target = _isExpanded ? ExpandedCornerRadiusDip : CapsuleCornerRadiusDip;
+        if (_heightSpring.IsSettled)
+            return target;
+
+        var from = _isExpanded ? ExpandedCornerRadiusDip : CapsuleCornerRadiusDip;
+        var to = _isExpanded ? CapsuleCornerRadiusDip : ExpandedCornerRadiusDip;
+        var progress = Math.Clamp(_heightSpring.Progress, 0d, 1d);
+        return from + ((to - from) * progress);
+    }
+
+    /// <summary>弹簧静止：把高度与透明度落回静态值。 / Spring at rest: land the height and opacity on plain values.</summary>
+    private void CompleteExpansion()
+    {
+        Height = _heightSpring.Target;
+        ExpandedPanel.Opacity = _isExpanded ? 1d : 0d;
+        ExpandedPanel.Visibility = _isExpanded ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>推一帧歌词跑马灯。 / Advances the lyric marquee one frame.</summary>
+    private void AdvanceMarquee(TimeSpan elapsed)
+    {
+        // 可用宽度取自裁剪容器而非TextBlock：滚动时 TextBlock 里装的是窗口字符串，
+        // 它的ActualWidth 会随内容变化，拿它当基准就成了自激反馈。
+        // The available width comes from the clipping host, not the TextBlock: while scrolling the TextBlock holds
+        // the window string and its ActualWidth moves with the content, which would feed back on itself.
+        var available = PrimaryTextHost.ActualWidth;
+        if (available <= 0d)
+            return;
+
+        var source = _marquee.Base;
+        if (string.IsNullOrEmpty(source))
+        {
+            _marqueeTransform.X = 0d;
+            PrimaryText.TextTrimming = TextTrimming.CharacterEllipsis;
+            return;
+        }
+
+        // 先把表打好：溢出判定与滚动位移共用它，一条歌词因此每帧只排版一次。
+        // Build the table first: the overflow test and the scroll offset share it, so one line is laid out once
+        // per frame at most.
+        var sourceWidth = EnsureMarqueePrefixWidths(source);
+        if (_marquee.Configure(sourceWidth, available, _motion.UseContinuousMotion))
+        {
+            if (_marquee.Advance(elapsed))
+                PrimaryText.Text = _marquee.BuildWindow();
+
+            // 位移走平移变换的 X；写入前先看是否真的变了，避免每帧无谓地弄脏渲染树。
+            // The offset rides the translate transform's X, and only a real change touches the render tree.
+            var offset = _marquee.ResolveOffsetDip(_marqueePrefixWidths, _marqueeMeasuredCharacters);
+            if (Math.Abs(_marqueeTransform.X - offset) > 0.01)
+                _marqueeTransform.X = offset;
+            PrimaryText.TextTrimming = TextTrimming.None;
+            return;
+        }
+
+        // 放得下（或当前不允许滚动）：回到静态呈现，省略号该留着就留着。
+        // 宽度表不主动清——它按长度与字体判定有效性，换行时新文本长度不同自然失效。
+        // It fits, or advancing is not allowed: fall back to the static presentation. The width table is not
+        // dropped here; it invalidates itself by length and font when the lyric changes.
+        if (_marquee.Advancing)
+            PrimaryText.Text = source;
+
+        _marqueeTransform.X = 0d;
+        PrimaryText.TextTrimming = string.IsNullOrEmpty(source) ? TextTrimming.CharacterEllipsis : TextTrimming.None;
+    }
+
+    /// <summary>
+    /// 懒测「原文 + 接缝」的前缀宽度表：溢出判定、滚动的小数位移与行进速度全部从这张表读，
+    /// 一条歌词因此只排版一次，而不是每帧一次。表按需向前生长，换文字、字号或字重时整表重测。
+    /// Lazily measures the prefix widths of source-plus-seam; the overflow test, the fractional scroll offset and
+    /// the travel speed all read from it, so one line is laid out once instead of once per frame. The table
+    /// grows on demand; new text, size, or weight rebuilds it.
+    /// </summary>
+    /// <returns>原文字宽（DIP）。 / The width of the source text in DIP.</returns>
+    private double EnsureMarqueePrefixWidths(string source)
+    {
+        var text = MarqueeRotationPolicy.BuildSource(source);
+        var font = $"{PrimaryText.FontSize:0.##}|{PrimaryText.FontWeight}|{PrimaryText.FontFamily.Source}";
+        var valid = _marqueePrefixWidths is { } cached
+            && cached.Length == text.Length + 1
+            && string.Equals(_marqueeMeasuredFont, font, StringComparison.Ordinal);
+        if (!valid)
+        {
+            _marqueePrefixWidths = new double[text.Length + 1];
+            _marqueeMeasuredCharacters = 0;
+            _marqueeMeasuredFont = font;
+        }
+
+        // 只补到当前窗口起点再多一个字符：够算偏移就行，不必把整句都排版一遍。
+        // Measure only up to the window start plus one character: enough for the offset, without laying out
+        // the whole line.
+        var required = Math.Min(text.Length, (_marquee.WindowStart < 0 ? 0 : _marquee.WindowStart) + 1);
+        for (var index = _marqueeMeasuredCharacters + 1; index <= required; index++)
+            _marqueePrefixWidths![index] = MeasureTextWidth(text[..index], PrimaryText);
+        _marqueeMeasuredCharacters = Math.Max(_marqueeMeasuredCharacters, required);
+
+        // 溢出判定要的是原文（不含接缝）的宽度：接缝只有 3 个空格，不影响「放不放得下」的结论。
+        // The overflow test wants the source width without the seam; three spaces never change whether it fits.
+        return MeasureTextWidth(source, PrimaryText);
+    }
+
+    /// <summary>量一段文字在给定文本元素上的精确宽度（DIP），不触发布局。 / Exact width of a string on a text element, in DIP.</summary>
+    private static double MeasureTextWidth(string text, System.Windows.Controls.TextBlock source)
+    {
+        if (string.IsNullOrEmpty(text))
+            return 0d;
+
+        var formatted = new FormattedText(
+            text,
+            System.Globalization.CultureInfo.CurrentUICulture,
+            FlowDirection.LeftToRight,
+            new Typeface(source.FontFamily, source.FontStyle, source.FontWeight, source.FontStretch),
+            source.FontSize,
+            Brushes.Transparent,
+            VisualTreeHelper.GetDpi(source).PixelsPerDip)
+        {
+            Trimming = TextTrimming.None
+        };
+        return formatted.WidthIncludingTrailingWhitespace;
+    }
+
+    /// <summary>只在弹簧在动或歌词在滚时才有帧节拍，其余时间完全停表。 / The frame beat only runs while the spring or the marquee needs it.</summary>
+    private void StartFrameTimer()
+    {
+        _lastFrameAt = DateTimeOffset.UtcNow;
+        if (!_frameTimer.IsEnabled)
+            _frameTimer.Start();
+    }
+
+    /// <summary>起低频探针。 / Starts the presence probe.</summary>
+    private void StartPresenceProbe()
+    {
+        _lastHoverSampleAt = DateTimeOffset.UtcNow;
+        if (!_presenceProbe.IsEnabled)
+            _presenceProbe.Start();
+    }
+
+    private void StopFrameTimerIfIdle()
+    {
+        if (_heightSpring.IsSettled && !_marquee.Advancing)
+            _frameTimer.Stop();
+    }
+
+    /// <summary>
+    /// 把形态设为目标态：<paramref name="expanded"/> 为 true 就展开，为 false 就收起。
+    /// 刻意做成「设定」而不是「取反」——悬停（临时）与点击锁定（粘滞）是同一个状态位的两个来源，
+    /// 对「鼠标移开」的期望相反；调用方若自己取反，两边就会永远拉扯、谁也压不过谁。
+    /// 高度交给弹簧积分，顶边保持不动，因此展开向下生长，符合顶部岛体的直觉。收起复用同一根弹簧
+    /// （速度连续），中途反向会像被手推开一样立刻掉头，而不是重新起步。
+    /// Drives the shape to a target: expanding when <paramref name="expanded"/> is true, collapsing when it is false.
+    /// Deliberately a "set" rather than a "toggle": hover (transient) and the click pin (sticky) are two sources
+    /// for one state bit and expect opposite things when the pointer leaves. A caller that inverts the current
+    /// shape instead would leave the two sources pulling against each other forever. The height runs on the
+    /// spring while the top edge stays put, so expansion grows downward as a top island should. Collapse reuses
+    /// the same spring, so a mid-flight reversal keeps continuous velocity instead of restarting from rest.
+    /// </summary>
+    /// <param name="expanded">目标展开态。 / The target expansion state.</param>
+    private void SetExpanded(bool expanded)
+    {
+        if (_isExpanded == expanded)
+            return;
+
+        // 展开与收起都要知道目标屏：展开高度按该屏工作区算，收起时则用紧凑态高度去夹住位置，
+        // 免得面板在矮屏上超出下边界。
+        // Both directions need the target display: the expanded height comes from its work area, and collapsing
+        // clamps with the compact height so the panel cannot overflow the bottom on a short display.
+        var monitor = ResolveMonitor();
+        var targetHeight = expanded
+            ? IslandPlacementPolicy.ResolveExpandedHeight(
+                monitor?.WorkArea ?? Rect.Empty, monitor?.DpiX ?? 0, monitor?.DpiY ?? 0)
+            : IslandPlacementPolicy.CompactHeightDip;
 
         if (monitor is not null)
         {
             var clamped = IslandPlacementPolicy.ClampWithinWorkArea(
                 new Point(Left, Top),
-                new Size(IslandPlacementPolicy.CompactWidthDip, targetHeight),
+                new Size(IslandPlacementPolicy.CompactWidthDip, Math.Max(targetHeight, Height)),
                 monitor.WorkArea, monitor.DpiX, monitor.DpiY);
             Left = clamped.X;
             Top = clamped.Y;
         }
 
-        if (!collapsing)
+        if (expanded)
         {
             // 内容错峰淡入的起点：面板先全透明，随高度增长一起浮现。
             // Start of the staggered reveal: the panel begins fully transparent and fades in as the window grows.
-            ExpandedPanel.Opacity = 0;
             ExpandedPanel.Visibility = Visibility.Visible;
         }
 
-        // 手感分工：展开用 BackEase 轻微过冲（灵动岛的「呼吸感」），收起用加速曲线快速离场。
-        // Feel: expand overshoots slightly (BackEase, the island "breath"), collapse accelerates away.
-        IEasingFunction easing = collapsing
-            ? new QuadraticEase { EasingMode = EasingMode.EaseIn }
-            : new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.18 };
-        var duration = collapsing ? CollapseDuration : ExpandDuration;
-
-        var animation = new DoubleAnimation(ActualHeight, targetHeight, duration) { EasingFunction = easing };
-        // 面板透明度与高度同轨：展开时长高先行、内容跟上；收起时内容先隐、空壳再缩。
-        // Panel opacity rides along: content follows the growth on expand, leads the shrink on collapse.
-        var fade = new DoubleAnimation(collapsing ? 1 : 0, collapsing ? 0 : 1, duration) { EasingFunction = easing };
         // TODO(prototype): 调试日志，正式发布前移除。 / Debug logging; remove before release.
-        AppLogService.Current?.Info("Island", $"切换展开态 / toggle expanded: {ActualHeight:F0} → {targetHeight:F0}");
-        animation.Completed += (_, _) =>
-        {
-            // 动画结束后把高度落回普通属性值，否则 HoldEnd 会钉住布局。
-            // Land the height back onto the plain property after the animation; HoldEnd would pin the layout.
-            BeginAnimation(HeightProperty, null);
-            Height = targetHeight;
-            if (collapsing)
-            {
-                ExpandedPanel.Visibility = Visibility.Collapsed;
-            }
-            // 透明度同理落回静态值，别让 HoldEnd 钉在中间帧。 / Land opacity too; HoldEnd would pin it.
-            ExpandedPanel.BeginAnimation(OpacityProperty, null);
-            ExpandedPanel.Opacity = collapsing ? 0 : 1;
-        };
+        AppLogService.Current?.Info("Island", $"设定展开态 / set expanded: {ActualHeight:F0} → {targetHeight:F0}");
 
-        _isExpanded = !collapsing;
-        BeginAnimation(HeightProperty, animation);
-        ExpandedPanel.BeginAnimation(OpacityProperty, fade);
+        _isExpanded = expanded;
+        _heightSpring.Retarget(targetHeight);
+
+        // 动效被系统关掉时直接落值，不进积分循环。
+        // When the environment has animations off, land the value directly instead of integrating.
+        if (!_motion.UseTransitions)
+        {
+            _heightSpring.Advance(TimeSpan.FromSeconds(1));
+            CompleteExpansion();
+            return;
+        }
+
+        StartFrameTimer();
+    }
+
+    /// <summary>
+    /// 全局左键按在岛体之外：解锁并立刻收起。岛体是 no-activate 窗口，拿不到焦点事件，
+    /// 所以「点别处」只能由全局鼠标钩子通知，再按屏幕坐标判断落点是否落在自己身上。
+    /// A global left click outside the island: drops the pin and collapses at once. The island is a no-activate
+    /// window and never receives focus events, so "clicked elsewhere" can only come from the global mouse hook,
+    /// which reports screen coordinates for us to test against our own bounds.
+    /// </summary>
+    private void OnGlobalLeftButtonPressed(object? sender, NativeMouseButtonEventArgs e)
+    {
+        if (!_isExpanded)
+            return;
+        if (IsPointInsideWindow(e.ScreenX, e.ScreenY))
+            return;
+
+        _hover.CollapseFromOutsideClick();
+        SetExpanded(false);
+    }
+
+    /// <summary>
+    /// 判断屏幕物理坐标是否落在岛体窗口内。不用 <see cref="PointFromScreen"/>：per-monitor DPI 过渡期间它会用
+    /// 上一块屏的旧变换，把本该在岛内的点判成外面。窗口的 <see cref="Window.Left"/> 与 <see cref="Window.Top"/>
+    /// 是 DIP、钩子给的是物理像素，所以两个方向各按自己的 DPI 换算——横向与纵向缩放不必相等。
+    /// Decides whether a physical screen point falls inside the island window. <see cref="PointFromScreen"/> is
+    /// avoided because during a per-monitor DPI transition it uses the previous screen's stale transform and reports
+    /// an inside point as outside. The window's <see cref="Window.Left"/>/<see cref="Window.Top"/> are DIP while the
+    /// hook reports physical pixels, so each axis converts with its own DPI — the two scales need not match.
+    /// </summary>
+    private bool IsPointInsideWindow(int screenX, int screenY)
+    {
+        var (dpiX, dpiY) = CurrentWindowDpi();
+        var scaleX = dpiX == 0u ? 1d : dpiX / 96d;
+        var scaleY = dpiY == 0u ? 1d : dpiY / 96d;
+        var width = ActualWidth > 0 ? ActualWidth : Width;
+        var height = ActualHeight > 0 ? ActualHeight : Height;
+        var left = Left * scaleX;
+        var top = Top * scaleY;
+        return screenX >= left && screenX <= left + (width * scaleX)
+            && screenY >= top && screenY <= top + (height * scaleY);
     }
 
     private async void OnPlayPauseClick(object sender, RoutedEventArgs e) => await _viewModel.TogglePlayPauseAsync();
