@@ -195,6 +195,12 @@ namespace AFMediaBar
                 services.AddSingleton<Func<TrackChangeNotificationWindow>>(sp =>
                     () => sp.GetRequiredService<TrackChangeNotificationWindow>());
 
+                // === 实验性灵动岛（--island 启动 / 显示模式页选择） Experimental island (--island / display-modes page) ===
+                services.AddTransient<IslandWindowViewModel>();
+                services.AddTransient<IslandWindow>();
+                services.AddSingleton<Func<IslandWindow>>(sp => () => sp.GetRequiredService<IslandWindow>());
+                services.AddSingleton<IslandPresentationCoordinator>();
+
                 // === 设置页面及其 ViewModel Settings Pages and ViewModels ===
                 services.AddSingleton<AppearancePage>();
                 services.AddSingleton<AppearanceViewModel>();
@@ -358,6 +364,16 @@ namespace AFMediaBar
             // Background pruning starts last: it can only judge "is anything playing" once the media session catalog is up, and its power message
             // window has to be created on the UI thread, which is also the thread every SystemEvents callback is marshalled back to.
             Services.GetRequiredService<MemoryPruneCoordinator>().Start();
+
+            // 实验性「灵动岛」原型：仅当命令行带 --island 时显示，不进入常规启动路径，也不读写任何设置。
+            // 走协调器而不是直接解析窗口：设置页选择模式唤起的是同一个实例，避免叠出两个岛。
+            // Experimental island prototype: shown only when launched with --island; it never enters the normal
+            // startup path and touches no settings. Routed through the coordinator so the settings page brings up
+            // the same instance instead of stacking a second island.
+            if (e.Args.Any(arg => string.Equals(arg, "--island", StringComparison.OrdinalIgnoreCase)))
+            {
+                Services.GetRequiredService<IslandPresentationCoordinator>().Show();
+            }
 
 #if DEBUG
             _debugLyricsDiagnostics = new DebugLyricsDiagnostics();

@@ -24,6 +24,7 @@ public partial class DisplayModesViewModel : ObservableObject
 {
     private readonly IDisplayMonitorService _displayMonitorService;
     private readonly LocalizationService _localization;
+    private readonly IslandPresentationCoordinator _islandCoordinator;
     private bool _isRefreshing;
     private DisplayModeSelection _selectedMode = DisplayModeSelection.Taskbar;
     private IReadOnlyList<DisplayMonitorOption> _monitorOptions = Array.Empty<DisplayMonitorOption>();
@@ -443,12 +444,20 @@ public partial class DisplayModesViewModel : ObservableObject
     /// an omittable one leaves a path where forgetting to inject it silently skips the refresh, and there is no sensible
     /// default language here.
     /// </param>
+    /// <summary>测试用便捷构造：协调器以空工厂创建，选中灵动岛不会真正创建窗口。 / Test convenience: the coordinator gets a null factory, so selecting the island never creates a window.</summary>
+    public DisplayModesViewModel(IDisplayMonitorService displayMonitorService, LocalizationService localization)
+        : this(displayMonitorService, localization, new IslandPresentationCoordinator())
+    {
+    }
+
     public DisplayModesViewModel(
         IDisplayMonitorService displayMonitorService,
-        LocalizationService localization)
+        LocalizationService localization,
+        IslandPresentationCoordinator islandCoordinator)
     {
         _displayMonitorService = displayMonitorService;
         _localization = localization;
+        _islandCoordinator = islandCoordinator;
         SettingsManager.SettingsChanged += OnSettingsChanged;
         _displayMonitorService.MonitorsChanged += OnMonitorsChanged;
 
@@ -509,6 +518,23 @@ public partial class DisplayModesViewModel : ObservableObject
         OnPropertyChanged(nameof(IsDesktopCardMode));
         OnPropertyChanged(nameof(IsFloatingBallMode));
         OnPropertyChanged(nameof(IsUnimplementedMode));
+        ApplyIslandVisibility(mode);
+    }
+
+    /// <summary>
+    /// 原型阶段的模式落地：选中「灵动岛」即唤起岛体，切回其它模式时收起。
+    /// 刻意不写 <see cref="AppSettings.WindowMode"/>——任务栏布局管线（如 <c>LayoutPresets</c> 的分发）
+    /// 还不认识 DynamicIsland，写入会踩进未实现分支；持久化等完整模式集成留给正式实现。
+    /// Prototype-mode landing: selecting the dynamic island summons it; any other mode retracts it.
+    /// Deliberately does not write AppSettings.WindowMode — the taskbar layout pipeline (e.g. LayoutPresets
+    /// dispatch) does not know DynamicIsland yet, and persistence awaits the full mode integration.
+    /// </summary>
+    private void ApplyIslandVisibility(DisplayModeSelection mode)
+    {
+        if (mode == DisplayModeSelection.DynamicIsland)
+            _islandCoordinator.Show();
+        else
+            _islandCoordinator.Hide();
     }
 
     private void UpdateExperience(TaskbarExperienceSettings value)

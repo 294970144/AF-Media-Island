@@ -518,6 +518,10 @@ public static partial class NativeMethods
     [LibraryImport("gdi32.dll")]
     public static partial IntPtr CreateRectRgn(int left, int top, int right, int bottom);
 
+    /// <summary>创建圆角矩形区域；成功交给 SetWindowRgn 后所有权归系统，调用方不得 DeleteObject。 / Creates a rounded-rect region; once handed to SetWindowRgn the system owns it — never DeleteObject it then.</summary>
+    [LibraryImport("gdi32.dll")]
+    public static partial IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int ellipseWidth, int ellipseHeight);
+
     /// <summary>读取设备上下文中指定像素的 COLORREF 值。/ Reads the COLORREF value of a pixel in a device context.</summary>
     [LibraryImport("gdi32.dll")]
     public static partial uint GetPixel(IntPtr hdc, int x, int y);
