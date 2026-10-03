@@ -628,6 +628,9 @@
   <data name="Common.ResetDialog.Confirm" xml:space="preserve">
     <value>還原</value>
   </data>
+  <data name="Common.ResetDialog.AllContent" xml:space="preserve">
+    <value>將所有頁面的設定還原為目前儲存的預設值；若未儲存，則還原為程式內建預設值。</value>
+  </data>
   <data name="Common.ResetDialog.Content" xml:space="preserve">
     <value>將重設「{0}」中的全部選項，其他頁面與目前播放不受影響。</value>
   </data>

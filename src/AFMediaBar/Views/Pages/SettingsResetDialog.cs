@@ -22,12 +22,15 @@ internal static class SettingsResetDialog
     /// page keeping its own translated copy of the name.
     /// </summary>
     /// <param name="scopeKey">作用域名称的文案键，例如 <c>Common.Page.Lyrics</c>。/ Localization key of the scope name, such as <c>Common.Page.Lyrics</c>.</param>
-    public static async Task<bool> ConfirmAsync(string scopeKey)
+    /// <param name="resetAll">是否使用覆盖所有页面的全局重置提示。</param>
+    public static async Task<bool> ConfirmAsync(string scopeKey, bool resetAll = false)
     {
         var dialog = new ContentDialog
         {
             Title = Translations.Get("Common.ResetDialog.Title"),
-            Content = Translations.Format("Common.ResetDialog.Content", Translations.Get(scopeKey)),
+            Content = resetAll
+                ? Translations.Get("Common.ResetDialog.AllContent")
+                : Translations.Format("Common.ResetDialog.Content", Translations.Get(scopeKey)),
             PrimaryButtonText = Translations.Get("Common.ResetDialog.Confirm"),
             CloseButtonText = Translations.Get("Common.Cancel"),
             DefaultButton = ContentDialogButton.Close
