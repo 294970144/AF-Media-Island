@@ -213,10 +213,10 @@ public sealed class IslandWindowViewModel : INotifyPropertyChanged
             // When loopback is silent (including paused), GetSpectrum already decays toward zero; only follow and publish here.
             _audioMonitorService.GetSpectrum(_targetSpectrum, SpectrumBandCount);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            // TODO(prototype): 正式发布前评估是否降噪为 Verbose。 / Revisit verbosity before release.
-            AppLogService.Current?.Warn("Island", $"频谱采样失败，跳帧 / spectrum sample failed, frame dropped: {ex.Message}");
+            // 这里连日志都不写：这条路径每 16ms 就可能走一次，任何一条日志自己都会变成噪声源头。
+            // Not even logging here: this path can be reached every 16 ms, so any log line would itself become noise.
             return;
         }
         for (var band = 0; band < SpectrumBandCount; band++)

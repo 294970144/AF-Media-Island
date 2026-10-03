@@ -72,7 +72,19 @@ public partial class IslandWindow : FluentWindow
     private int _marqueeMeasuredCharacters;
     private string _marqueeMeasuredFont = string.Empty;
     private bool _isExpanded;
+    private HwndSource? _hwndSource;
+    private bool _dpiRestoreQueued;
+    private double? _pendingNormalizedCenterX;
+    private Point? _pendingPlacementDip;
     private double _lastShellRadius = CapsuleCornerRadiusDip;
+
+    // 上一次交给 GDI 的窗口区域尺寸（物理像素）。三者都没变就不重建区域：SizeChanged 一次布局可能
+    // 连着触发好几遍，而每次重建都要走一次 GDI 区域分配。
+    // The last window-region geometry handed to GDI, in physical pixels. All three unchanged means no rebuild:
+    // one layout pass can raise SizeChanged several times and each rebuild costs a GDI region allocation.
+    private int _lastRegionWidthPx = -1;
+    private int _lastRegionHeightPx = -1;
+    private int _lastRegionRadiusPx = -1;
 
     /// <summary>创建岛体窗口并接通外观、显示器与状态源。 / Creates the island window and wires appearance, monitors, and state.</summary>
     public IslandWindow(
@@ -138,11 +150,17 @@ public partial class IslandWindow : FluentWindow
         {
             ApplyCapsuleRegion();
             ClearSystemFrameBorder();
+            AttachWindowMessageHook();
         };
         SizeChanged += (_, _) => ApplyCapsuleRegion();
 
         Closed += (_, _) =>
         {
+            if (_hwndSource is not null)
+            {
+                _hwndSource.RemoveHook(OnWindowMessage);
+                _hwndSource = null;
+            }
             _frameTimer.Stop();
             _frameTimer.Tick -= OnFrameTick;
             _presenceProbe.Stop();
@@ -157,8 +175,6 @@ public partial class IslandWindow : FluentWindow
     /// <summary>把岛体定位到主显示器顶部居中并显示，随后启动状态源。 / Places the island at the top-center of the primary display, shows it, and starts the state source.</summary>
     public void ShowIsland()
     {
-        // TODO(prototype): 生命周期调试日志，正式发布前随本注释一并移除。 / Lifecycle debug logging; remove before release.
-        AppLogService.Current?.Info("Island", $"显示岛体 / showing island at ({Left:F0},{Top:F0}) h={Height:F0}");
         ApplyPlacement(IslandPlacementPolicy.CompactHeightDip);
         // 此刻窗口才刚布局完，真实高度才可信：把弹簧起点校准到它，再开始跑。
         // Only now is the window laid out and its real height trustworthy: align the spring's origin before rolling.
@@ -168,6 +184,10 @@ public partial class IslandWindow : FluentWindow
         // Both policies reset on re-show: a leftover pin or hide verdict from last time must not carry over.
         _hover.Reset();
         _visibility.Reset();
+        // 隐藏期间窗口区域可能被系统丢弃，重新显示时强制重建一次：否则去重逻辑会以为轮廓没变而跳过。
+        // The window region may have been dropped by the system while hidden, so force one rebuild on re-show:
+        // otherwise the de-duplication would think the silhouette is unchanged and skip it.
+        InvalidateCapsuleRegion();
         _viewModel.Start();
         Show();
         // 重新显示后再擦一次系统色描边：隐藏期间系统可能重建了非客户区，Show() 本身也可能触发激活路径。
@@ -183,8 +203,6 @@ public partial class IslandWindow : FluentWindow
     /// <summary>隐藏岛体并停掉状态源；窗口实例保留，供显示模式页或协调器再次唤起。 / Hides the island and stops its state source; the instance stays alive for re-showing.</summary>
     public void HideIsland()
     {
-        // TODO(prototype): 调试日志，正式发布前移除。 / Debug logging; remove before release.
-        AppLogService.Current?.Info("Island", "隐藏岛体 / hiding island");
         Hide();
         _viewModel.Stop();
         // 隐藏后没有任何东西需要推进，停表省掉后台 60Hz 空转（窗口只是 Hide，Dispatcher 仍在跑）。
@@ -213,18 +231,18 @@ public partial class IslandWindow : FluentWindow
             // Drop the pin while hidden, otherwise the island reappears stuck open for no visible reason.
             _hover.Reset();
             if (IsVisible)
-                Hide();
+                HideIsland();
             return;
         }
 
+        // 重新显示必须走 ShowIsland 而不是裸 Show：协调器（显示模式页切换、--island 启动开关）也调它，
+        // 两处若各走一条，重新显示时就会漏掉 ViewModel.Start、位置校准与探针起表——症状是岛体回来了却
+        // 不再更新媒体。
+        // Re-showing must go through ShowIsland rather than a bare Show: the coordinator (display-mode switches,
+        // the --island launch switch) calls it too, and two separate paths would let a re-show skip
+        // ViewModel.Start, placement and the probe — the symptom being an island that returns but stops updating.
         if (!IsVisible)
-        {
-            Show();
-            // 重新显示后高度得重新校准，否则弹簧会拿隐藏前的目标继续跑。
-            // Re-align the height after re-showing, or the spring would keep chasing its pre-hide target.
-            Height = IslandPlacementPolicy.CompactHeightDip;
-            _heightSpring.ResetTo(Height);
-        }
+            ShowIsland();
 
         // 形态只有一个写入者：按悬停策略给出的目标态设定，绝不自己取反。
         // The shape has exactly one writer: it is set from the hover policy's target and never inverted here.
@@ -250,9 +268,6 @@ public partial class IslandWindow : FluentWindow
         if (ActualWidth <= 0 || ActualHeight <= 0)
             return;
 
-        // TODO(prototype): 调试日志，正式发布前移除。 / Debug logging; remove before release.
-        AppLogService.Current?.Verbose("Island", $"重设窗口区域 / reapply region {ActualWidth:F0}x{ActualHeight:F0}");
-
         // 动画期间按弹簧进度在两种圆角之间插值，否则收起/展开时轮廓会在最后一帧突然换形状。
         // 与 Shell 的 XAML 圆角共用同一计算，两处才不会错位。
         // Interpolating between the two radii along the spring progress avoids the outline snapping to a new shape
@@ -263,10 +278,37 @@ public partial class IslandWindow : FluentWindow
         var widthPx = (int)Math.Ceiling(ActualWidth * dpi.PixelsPerDip);
         var heightPx = (int)Math.Ceiling(ActualHeight * dpi.PixelsPerDip);
         var radiusPx = (int)Math.Ceiling(Math.Min(radiusDip, ActualHeight / 2) * dpi.PixelsPerDip);
+
+        // 尺寸与半径都没变就跳过：SizeChanged 在布局时可能连着触发好几次，而重建窗口区域要走一次
+        // GDI CreateRoundRectRgn 分配。静止时轮廓本就不变，重建纯属白做。
+        // Skip when neither the size nor the radius moved: SizeChanged can fire several times per layout pass,
+        // and rebuilding the region costs a GDI CreateRoundRectRgn allocation. At rest the silhouette is
+        // unchanged, so rebuilding it is pure waste.
+        if (widthPx == _lastRegionWidthPx && heightPx == _lastRegionHeightPx && radiusPx == _lastRegionRadiusPx)
+            return;
+
+        _lastRegionWidthPx = widthPx;
+        _lastRegionHeightPx = heightPx;
+        _lastRegionRadiusPx = radiusPx;
+
         var region = NativeMethods.CreateRoundRectRgn(0, 0, widthPx + 1, heightPx + 1, radiusPx, radiusPx);
         if (region == nint.Zero)
             return;
         NativeMethods.SetWindowRgn(source.Handle, region, true);
+    }
+
+    /// <summary>
+    /// 作废已记录的窗口区域几何，逼下一次 <see cref="ApplyCapsuleRegion"/> 真的重建一次。
+    /// 隐藏再显示、显示器热插拔这类外部变化不会体现为尺寸变化，去重逻辑就看不出轮廓其实该重建了。
+    /// Invalidates the recorded window-region geometry so the next <see cref="ApplyCapsuleRegion"/> really rebuilds.
+    /// External changes such as hide-then-show or a monitor hot-plug never show up as a size change, so the
+    /// de-duplication cannot tell that the silhouette should be rebuilt.
+    /// </summary>
+    private void InvalidateCapsuleRegion()
+    {
+        _lastRegionWidthPx = -1;
+        _lastRegionHeightPx = -1;
+        _lastRegionRadiusPx = -1;
     }
 
     /// <summary>
@@ -310,6 +352,100 @@ public partial class IslandWindow : FluentWindow
         // never break the island.
         NativeMethods.DwmSetWindowAttribute(
             source.Handle, NativeMethods.DWMWA_BORDER_COLOR, ref none, sizeof(int));
+    }
+
+    /// <summary>
+    /// 挂上窗口消息钩子，只为监听 DPI 变化：系统既不提供 WPF 事件，也不保证 <c>SizeChanged</c> 会触发——
+    /// per-monitor 缩放变化时窗口 DIP 尺寸可能一点没动，只有物理像素变了，
+    /// 于是上层既没尺寸变化也没 DPI 提示，岛体就挂在错误的物理位置上。
+    /// Attaches the window message hook purely to listen for DPI changes: the system offers no WPF event and does not
+    /// promise a SizeChanged either — with per-monitor scaling the DIP size can stay identical while only the physical
+    /// pixels change, so nothing above learns that the island now sits at the wrong physical spot.
+    /// </summary>
+    private void AttachWindowMessageHook()
+    {
+        if (PresentationSource.FromVisual(this) is not HwndSource source)
+            return;
+
+        _hwndSource = source;
+        source.AddHook(OnWindowMessage);
+    }
+
+    private nint OnWindowMessage(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
+    {
+        if (msg == NativeMethods.WM_DPICHANGED)
+            ScheduleDpiRestore();
+        return nint.Zero;
+    }
+
+    /// <summary>
+    /// DPI 刚变：此刻旧的窗口矩形还有效，先把中心在工作区里的归一化位置存下来，
+    /// 再排一次「过渡完成后」的恢复——与 <see cref="RecoverAfterDpiChange"/> 成一对。
+    /// A DPI change just arrived: the old window rectangle is still valid, so record the normalised work-area centre
+    /// now and queue a recovery for once the transition settles — the counterpart of <see cref="RecoverAfterDpiChange"/>.
+    /// </summary>
+    private void ScheduleDpiRestore()
+    {
+        if (_dpiRestoreQueued)
+            return;
+        _dpiRestoreQueued = true;
+
+        var monitor = ResolveMonitor();
+        if (monitor is not null)
+        {
+            var (dpiX, dpiY) = CurrentWindowDpi();
+            _pendingNormalizedCenterX = IslandDpiRestorePolicy.CaptureNormalizedCenterX(
+                monitor.WorkArea, new Point(Left, Top), new Size(ActualWidth, ActualHeight), dpiX, dpiY);
+        }
+
+        // ContextIdle：等 WPF 自己完成一轮 DPI 换算与重排，再去问尺寸与 WorkArea，否则读到的是过渡中间态。
+        // ContextIdle: let WPF finish its own DPI conversion and layout pass before asking for sizes, or what comes
+        // back is a mid-transition snapshot.
+        Dispatcher.BeginInvoke(RecoverAfterDpiChange, DispatcherPriority.ContextIdle);
+    }
+
+    /// <summary>
+    /// 过渡结束后的落地：按归一化中心把岛体放回新工作区，并重算一眼 GDI 圆角区域——
+    /// 只有 Left/Top 变化而尺寸没变时 <c>SizeChanged</c> 不触发，区域会留着旧物理尺寸。
+    /// Landing after the transition: put the island back via the normalised centre and rebuild the GDI region —
+    /// when only Left/Top move and no size changes, SizeChanged never fires and the region keeps stale pixels.
+    /// </summary>
+    private void RecoverAfterDpiChange()
+    {
+        _dpiRestoreQueued = false;
+        if (_hwndSource is null)
+            return;
+
+        var monitor = ResolveMonitor();
+        if (monitor is null)
+            return;
+
+        var (dpiX, dpiY) = CurrentWindowDpi();
+        var sizeDip = new Size(
+            double.IsFinite(ActualWidth) && ActualWidth > 0 ? ActualWidth : IslandPlacementPolicy.CompactWidthDip,
+            double.IsFinite(ActualHeight) && ActualHeight > 0 ? ActualHeight : IslandPlacementPolicy.CompactHeightDip);
+        var topLeft = IslandDpiRestorePolicy.RestoreTopLeft(
+            monitor.WorkArea, sizeDip, _pendingNormalizedCenterX ?? IslandDpiRestorePolicy.FallbackNormalizedCenterX, dpiX, dpiY);
+        _pendingNormalizedCenterX = null;
+
+        InvalidateCapsuleRegion();
+        ApplyCapsuleRegion();
+
+        // 动画进行中就别插手：跑去改 Left/Top 会让弹簧还在生长的高度与「该在哪」互相打架。
+        // 先把最新的这一次请求存着，弹簧静止后统一落一次——只认最新，中途的过期请求全部作废。
+        // Do not intervene mid-animation: changing Left/Top while the spring still grows a height makes the two
+        // fight. The newest request is parked and landed once after the spring settles — the newest wins and
+        // anything outdated in between is simply dropped.
+        if (_heightSpring.IsSettled)
+            ApplyPlacementCoordinates(topLeft);
+        else
+            _pendingPlacementDip = topLeft;
+    }
+
+    private void ApplyPlacementCoordinates(Point topLeftDip)
+    {
+        Left = topLeftDip.X;
+        Top = topLeftDip.Y;
     }
 
     private void ApplyPlacement(double heightDip)
@@ -530,12 +666,17 @@ public partial class IslandWindow : FluentWindow
     /// </summary>
     private double ResolveShellRadiusDip()
     {
-        var target = _isExpanded ? ExpandedCornerRadiusDip : CapsuleCornerRadiusDip;
+        // 静止时取目标形态的定值。
+        // At rest, the target shape's fixed value applies.
         if (_heightSpring.IsSettled)
-            return target;
+            return _isExpanded ? ExpandedCornerRadiusDip : CapsuleCornerRadiusDip;
 
-        var from = _isExpanded ? ExpandedCornerRadiusDip : CapsuleCornerRadiusDip;
-        var to = _isExpanded ? CapsuleCornerRadiusDip : ExpandedCornerRadiusDip;
+        // 运动中在两个定值之间插值。插值方向与弹簧的起止一致：
+        // 展开时半径从胶囊的 23 走到展开态的 18，收起时反向。
+        // While moving, interpolate between the two fixed radii. The direction follows the spring: expanding goes
+        // from the capsule's 23 to the expanded 18, collapsing goes back.
+        var from = _isExpanded ? CapsuleCornerRadiusDip : ExpandedCornerRadiusDip;
+        var to = _isExpanded ? ExpandedCornerRadiusDip : CapsuleCornerRadiusDip;
         var progress = Math.Clamp(_heightSpring.Progress, 0d, 1d);
         return from + ((to - from) * progress);
     }
@@ -546,6 +687,16 @@ public partial class IslandWindow : FluentWindow
         Height = _heightSpring.Target;
         ExpandedPanel.Opacity = _isExpanded ? 1d : 0d;
         ExpandedPanel.Visibility = _isExpanded ? Visibility.Visible : Visibility.Collapsed;
+
+        // 延后的定位请求在这里落地：动画期间进来的（DPI 切换、跨屏）被收在 _pendingPlacementDip，
+        // 只保留最后一次，此刻一次性应用，避免动画每帧都与新目标来回拉扯。
+        // Deferred placement lands here: requests that arrived mid-animation (a DPI switch, a display hop) were parked
+        // in _pendingPlacementDip keeping only the newest, and are applied once here so no frame fights the target.
+        if (_pendingPlacementDip is { } pending)
+        {
+            _pendingPlacementDip = null;
+            ApplyPlacementCoordinates(pending);
+        }
     }
 
     /// <summary>推一帧歌词跑马灯。 / Advances the lyric marquee one frame.</summary>
@@ -702,12 +853,19 @@ public partial class IslandWindow : FluentWindow
                 monitor?.WorkArea ?? Rect.Empty, monitor?.DpiX ?? 0, monitor?.DpiY ?? 0)
             : IslandPlacementPolicy.CompactHeightDip;
 
+        // 高度动之前先抓锚点：Width/Height 落地之后旧的边缘就拿不回来了，而这一次的展开/收起
+        // 要保证「原来的横向中心」和「原来的顶边」都不漂。（祖传自原作者被删的那版 Window.Animation，
+        // 他那版宽高都变、按贴靠边挑锚点；本形态固定宽度且顶部居中，只用（中心 + 顶边）这一对。）
+        // Capture the anchors before the height moves: once Width/Height land the old edges are gone, and this
+        // expansion/collapse must keep both "the previous horizontal centre" and "the previous top edge" from drifting.
+        var anchors = IslandSizeAnchors.Capture(new Point(Left, Top), new Size(ActualWidth, Height));
+
         if (monitor is not null)
         {
+            var targetSize = new Size(IslandPlacementPolicy.CompactWidthDip, Math.Max(targetHeight, Height));
+            var anchored = anchors.ResolveTopLeft(targetSize, IslandAnchorX.Center, IslandAnchorY.Top);
             var clamped = IslandPlacementPolicy.ClampWithinWorkArea(
-                new Point(Left, Top),
-                new Size(IslandPlacementPolicy.CompactWidthDip, Math.Max(targetHeight, Height)),
-                monitor.WorkArea, monitor.DpiX, monitor.DpiY);
+                anchored, targetSize, monitor.WorkArea, monitor.DpiX, monitor.DpiY);
             Left = clamped.X;
             Top = clamped.Y;
         }
@@ -718,9 +876,6 @@ public partial class IslandWindow : FluentWindow
             // Start of the staggered reveal: the panel begins fully transparent and fades in as the window grows.
             ExpandedPanel.Visibility = Visibility.Visible;
         }
-
-        // TODO(prototype): 调试日志，正式发布前移除。 / Debug logging; remove before release.
-        AppLogService.Current?.Info("Island", $"设定展开态 / set expanded: {ActualHeight:F0} → {targetHeight:F0}");
 
         _isExpanded = expanded;
         _heightSpring.Retarget(targetHeight);
