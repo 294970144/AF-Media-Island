@@ -149,10 +149,13 @@
                                 Style="{StaticResource ModeChoiceStyle}">
                                 <StackPanel>
                                     <DockPanel>
+                                        <!--  灵动岛已是可落地的运行模式并被记住，因此它与任务栏共用「当前模式」芯片。  -->
+                                        <!--  The island is a landed, remembered running mode now, so it shares the "current mode" chip with the taskbar.  -->
                                         <ContentControl
                                             DockPanel.Dock="Right"
-                                            Content="{DynamicResource Loc.Common.NotImplemented}"
-                                            Style="{StaticResource AfSettingsBadgeNeutralStyle}" />
+                                            Content="{DynamicResource Loc.DisplayModes.Mode.Current}"
+                                            Style="{StaticResource AfSettingsBadgeAccentStyle}"
+                                            Visibility="{Binding ViewModel.IsDynamicIslandHostingActive, Converter={StaticResource BooleanToVisibilityConverter}}" />
                                         <TextBlock
                                             FontSize="16"
                                             FontWeight="{DynamicResource AppTextStrongFontWeight}"

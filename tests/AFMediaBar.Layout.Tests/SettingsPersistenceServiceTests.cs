@@ -135,7 +135,10 @@ public sealed class SettingsPersistenceServiceTests
         CollectionAssert.AreEqual(
             new[] { LyricsSecondaryLineMode.Romanization, LyricsSecondaryLineMode.Translation },
             SettingsManager.Current.LyricsSecondaryLine.Order!.ToArray());
-        Assert.AreEqual(WindowMode.Taskbar, SettingsManager.Current.WindowMode);
+        // 刻意写成灵动岛：Taskbar 是默认值，即使读档失败也会「看起来正确」，这条断言就失去意义了。
+        // Deliberately written as the dynamic island: Taskbar is the default, so a failed load would still "look
+        // correct" and this assertion would prove nothing. The whole point is that the choice survives the round trip.
+        Assert.AreEqual(WindowMode.DynamicIsland, SettingsManager.Current.WindowMode);
         Assert.AreEqual(DynamicIslandEdge.Right, SettingsManager.Current.DynamicIslandEdge);
         Assert.AreEqual(700, SettingsManager.Current.Appearance.FontWeight);
         Assert.AreEqual("Arial", SettingsManager.Current.Appearance.LatinFontFamily);
@@ -676,8 +679,12 @@ public sealed class SettingsPersistenceServiceTests
         SettingsManager.ResetGeneral();
         Assert.IsFalse(SettingsManager.Current.LyricsEnabled);
         Assert.AreEqual(700, SettingsManager.Current.Appearance.FontWeight);
-        Assert.AreEqual(WindowMode.Taskbar, SettingsManager.Current.WindowMode);
+        // 常规页不拥有窗口模式：它必须原样留着，否则这条测试自己宣称的「各范围只改自有字段」就不成立了。
+        // The general page does not own the window mode: it has to stay put, or this test's own claim that each scope
+        // only touches its owned fields would not hold.
+        Assert.AreEqual(WindowMode.DynamicIsland, SettingsManager.Current.WindowMode);
         SettingsManager.ResetLayout();
+        // 布局页拥有窗口模式，因此这里回到默认。/ The layout page owns it, so back to the default here.
         Assert.AreEqual(WindowMode.Taskbar, SettingsManager.Current.WindowMode);
         Assert.AreEqual(700, SettingsManager.Current.Appearance.FontWeight);
         SettingsManager.Current.TaskbarExperience = TaskbarExperienceSettings.Default with
@@ -777,6 +784,68 @@ public sealed class SettingsPersistenceServiceTests
             Assert.AreEqual(1, layoutEvents);
         }
         finally { SettingsManager.LayoutSettingsChanged -= handler; }
+    }
+
+    /// <summary>
+    /// 灵动岛作为运行模式必须跨会话存活；只有越界的取值才被修回默认。这条覆盖了以前「读档即丢弃」的行为。
+    /// The dynamic island as a running mode must survive restarts; only an out-of-range value gets repaired.
+    /// This covers the old behaviour of discarding it on every load.
+    /// </summary>
+    [TestMethod]
+    public void WindowModeSurvivesReloadAndOnlyRepairsOutOfRangeValues()
+    {
+        using (var writer = new SettingsPersistenceService(_directory))
+        {
+            writer.Initialize();
+            SettingsManager.Current.WindowMode = WindowMode.DynamicIsland;
+            writer.Flush();
+        }
+        SettingsManager.ResetAll();
+        using (var reader = new SettingsPersistenceService(_directory)) reader.Initialize();
+
+        Assert.AreEqual(WindowMode.DynamicIsland, SettingsManager.Current.WindowMode);
+        Assert.AreEqual(WindowMode.Taskbar, new AppSettings { WindowMode = (WindowMode)99 }.Normalize().WindowMode,
+            "手改过的越界值仍要修回默认。/ An out-of-range value from a hand-edited file must still be repaired.");
+    }
+
+    /// <summary>
+    /// 页面选模式要真的写进存档：选灵动岛写 DynamicIsland，切回任务栏写回 Taskbar，
+    /// 而灵动岛不算「未实现」占位。 Page selections must really land in storage: picking the island writes
+    /// DynamicIsland, switching back writes Taskbar, and the island is not an "unimplemented" placeholder.
+    /// </summary>
+    [TestMethod]
+    public void SelectingDynamicIslandPersistsModeAndTaskbarWritesBack()
+    {
+        SettingsManager.Replace(new AppSettings());
+        // 便利构造给的是空工厂协调器，因此选岛不会真的创建窗口。 / The convenience constructor supplies a
+        // null-factory coordinator, so selecting the island never creates a window.
+        var viewModel = new DisplayModesViewModel(new FakeDisplayMonitorService(), new LocalizationService());
+
+        viewModel.SwitchToDynamicIslandModeCommand.Execute(null);
+        Assert.AreEqual(WindowMode.DynamicIsland, SettingsManager.Current.WindowMode);
+        Assert.IsTrue(viewModel.IsDynamicIslandHostingActive);
+        Assert.IsFalse(viewModel.IsTaskbarHostingActive);
+        Assert.IsFalse(viewModel.IsUnimplementedMode);
+
+        viewModel.SwitchToTaskbarModeCommand.Execute(null);
+        Assert.AreEqual(WindowMode.Taskbar, SettingsManager.Current.WindowMode);
+        Assert.IsTrue(viewModel.IsTaskbarHostingActive);
+        Assert.IsFalse(viewModel.IsDynamicIslandHostingActive);
+    }
+
+    /// <summary>
+    /// 重开设置页时，模式高亮要跟上存档里的运行模式，不能停在任务栏上跟页头的「当前模式」芯片互相打脸。
+    /// Opening the settings page again must follow the stored running mode instead of parking the highlight on the
+    /// taskbar and contradicting the "current mode" chip in the header.
+    /// </summary>
+    [TestMethod]
+    public void ModeHighlightFollowsStoredModeOnPageOpen()
+    {
+        SettingsManager.Replace(new AppSettings { WindowMode = WindowMode.DynamicIsland });
+        var viewModel = new DisplayModesViewModel(new FakeDisplayMonitorService(), new LocalizationService());
+
+        Assert.IsTrue(viewModel.IsDynamicIslandMode, "高亮必须与存档一致。/ The highlight has to match storage.");
+        Assert.IsTrue(viewModel.IsDynamicIslandHostingActive);
     }
 
     private static DisplayMonitorInfo Monitor(string id, bool primary) =>

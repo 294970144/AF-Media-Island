@@ -365,12 +365,15 @@ namespace AFMediaBar
             // window has to be created on the UI thread, which is also the thread every SystemEvents callback is marshalled back to.
             Services.GetRequiredService<MemoryPruneCoordinator>().Start();
 
-            // 实验性「灵动岛」原型：仅当命令行带 --island 时显示，不进入常规启动路径，也不读写任何设置。
-            // 走协调器而不是直接解析窗口：设置页选择模式唤起的是同一个实例，避免叠出两个岛。
-            // Experimental island prototype: shown only when launched with --island; it never enters the normal
-            // startup path and touches no settings. Routed through the coordinator so the settings page brings up
-            // the same instance instead of stacking a second island.
-            if (e.Args.Any(arg => string.Equals(arg, "--island", StringComparison.OrdinalIgnoreCase)))
+            // 实验性「灵动岛」原型的入口有两个，且落的是同一个协调器实例：命令行 --island 是开发时的临时开关；
+            // 存档里 WindowMode == DynamicIsland 则是用户在显示模式页挑出来、跨会话要记住的选择。
+            // 两者都走协调器而不是直接解析窗口：设置页唤起的是同一个实例，不会叠出两个岛。
+            // The experimental island prototype has two entry points, both going through the same coordinator instance:
+            // the --island command line is a temporary developer switch, while a stored WindowMode == DynamicIsland is the
+            // choice the user made on the display-modes page and expects to survive restarts. Neither constructs the
+            // window directly, so the settings page cannot stack a second island.
+            if (e.Args.Any(arg => string.Equals(arg, "--island", StringComparison.OrdinalIgnoreCase)) ||
+                SettingsManager.Current.WindowMode == AFMediaBar.Classes.Models.Layout.WindowMode.DynamicIsland)
             {
                 Services.GetRequiredService<IslandPresentationCoordinator>().Show();
             }
