@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Remove the current user's startup entry when uninstalling the installation it targets, avoiding a registry value pointing to a deleted executable. Preserve entries targeting a copy in another directory.
+
 ### Changed
 
 - Generate contributor snapshots in Release CI with paginated API requests, review them alongside version metadata on the isolated branch, and synchronize legacy snapshots through a PR.
