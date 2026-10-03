@@ -31,9 +31,12 @@ jobs:
         shell: pwsh
         run: |
           $stable = Get-Content metadata/release/latest.json -Raw | ConvertFrom-Json
-          $legacy = Get-Content source/docs/latest.json -Raw | ConvertFrom-Json
-          if ([version]$stable.version -lt [version]$legacy.version) { throw 'Refusing to downgrade the legacy update channel.' }
-          Copy-Item metadata/release/latest.json source/docs/latest.json -Force
+          if (Test-Path source/docs/latest.json) {
+            $legacy = Get-Content source/docs/latest.json -Raw | ConvertFrom-Json
+            if ([version]$stable.version -lt [version]$legacy.version) { throw 'Refusing to downgrade the legacy update channel.' }
+            Copy-Item metadata/release/latest.json source/docs/latest.json -Force
+          }
+          Copy-Item metadata/release/contributors.json source/docs/contributors.json -Force
           "version=$($stable.version)" >> $env:GITHUB_OUTPUT
       - name: Propose legacy manifest synchronization
         uses: peter-evans/create-pull-request@v8
@@ -43,10 +46,12 @@ jobs:
           base: main
           branch: codex/sync-stable-release-metadata
           delete-branch: true
-          add-paths: docs/latest.json
-          title: Sync stable update manifest ${{ steps.stable.outputs.version }}
-          commit-message: Sync stable update manifest ${{ steps.stable.outputs.version }}
+          add-paths: |
+            docs/latest.json
+            docs/contributors.json
+          title: Sync release metadata ${{ steps.stable.outputs.version }}
+          commit-message: Sync release metadata ${{ steps.stable.outputs.version }}
           body: |
             Copy of the reviewed stable manifest from release-metadata/release/latest.json.
-            Merge this PR to deliver updates to older clients whose endpoints still point to main/docs/latest.json.
-            No package URL, size or checksum needs to be entered manually.
+            Includes the reviewed contributor snapshot from release-metadata/release/contributors.json.
+            Merge this PR to refresh metadata for older clients. A retired main/docs/latest.json is not recreated.

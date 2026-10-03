@@ -40,6 +40,9 @@ jobs:
       - name: Verify release scripts
         shell: pwsh
         run: ./tools/verify-release-metadata.ps1
+      - name: Verify contributor snapshot generation
+        shell: pwsh
+        run: ./tools/verify-contributors-snapshot.ps1
       - name: Restore
         run: dotnet restore ./src/AFMediaBar.slnx -r win-x64
       - name: Build
@@ -85,6 +88,11 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: ./tools/new-release-manifest.ps1 -Tag $env:TAG -Repository $env:GITHUB_REPOSITORY
+      - name: Generate contributors snapshot
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./tools/update-contributors.ps1 -Repository $env:GITHUB_REPOSITORY -OutputPath artifacts/metadata/contributors.json
       - uses: actions/upload-artifact@v7
         with:
           name: release-info-${{ github.ref_name }}
@@ -153,6 +161,7 @@ jobs:
           New-Item -ItemType Directory -Path metadata/release/version -Force | Out-Null
           Copy-Item generated/latest-preview.json metadata/release/latest-preview.json -Force
           Copy-Item generated/version/*.json metadata/release/version/ -Force
+          Copy-Item generated/contributors.json metadata/release/contributors.json -Force
       - name: Propose metadata update
         uses: peter-evans/create-pull-request@v8
         with:
@@ -165,5 +174,6 @@ jobs:
           title: Update release metadata ${{ github.ref_name }}
           commit-message: Update release metadata ${{ github.ref_name }}
           body: |
-            Generated from the final release packages. Review the preview channel before merging.
+            Version metadata is generated from final packages; contributors are fetched from the GitHub API.
+            Review the preview channel and contributor snapshot before merging.
             This does not change the stable channel. Publish the draft release before offering this preview publicly.

@@ -63,7 +63,9 @@ NetEase Cloud Music, QQ Music, Spotify, browsers, and other apps can be discover
 
 ### Updating
 
-About 20 seconds after launch the app reads the stable manifest (`release/latest.json`) on the isolated `release-metadata` branch. When a newer version exists, the tray icon shows one system notification whose click opens the Application page. Release Actions generate metadata automatically; review and stable promotion control when it becomes active. Older clients receive the same stable manifest through an automated synchronization PR for `main/docs/latest.json`. See the [release workflow](docs/release-ci.md) for configuration.
+About 20 seconds after launch the app reads the stable manifest (`release/latest.json`) on the isolated `release-metadata` branch. When a newer version exists, the tray icon shows one system notification whose click opens the Application page. Release Actions generate metadata automatically; review and stable promotion control when it becomes active. If `main/docs/latest.json` is retained, synchronization PRs update it for older clients. See the [Release CI](.github/workflows/release.yml).
+
+Release CI also generates contributor snapshots, reviewed alongside version manifests at `release-metadata/release/contributors.json`. The app still tries the GitHub contributors API first and falls back to that snapshot; synchronization PRs maintain `docs/contributors.json` on main for compatibility. The sponsor list, `docs/sponsors.json`, remains manually maintained on main.
 The portable build has no install record, so it only downloads.
 
 The install log is written to `%LOCALAPPDATA%\AFMediaBar\updates\install-<version>.log`, and downloaded installers live in the same folder, cleaned up by version on the next launch.

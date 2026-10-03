@@ -64,7 +64,9 @@ flowchart LR
 
 ### 更新
 
-程序启动约 20 秒后读取独立 `release-metadata` 分支上的稳定版本清单（`release/latest.json`）。发现新版本时：托盘图标弹出一次系统通知，点击直接打开「应用」页。清单由发布 Action 自动生成，经审核和稳定版晋级后生效；旧客户端通过自动同步 PR 更新的 `main/docs/latest.json` 获取同一份稳定清单。发布配置见 [发布流程](docs/release-ci.md)。
+程序启动约 20 秒后读取独立 `release-metadata` 分支上的稳定版本清单（`release/latest.json`）。发现新版本时：托盘图标弹出一次系统通知，点击直接打开「应用」页。清单由发布 Action 自动生成，经审核和稳定版晋级后生效；若保留 `main/docs/latest.json`，同步 PR 会为旧客户端更新该清单。发布工作流见 [Release CI](.github/workflows/release.yml)。
+
+贡献者快照也由 Release CI 自动生成，随版本清单在 `release-metadata/release/contributors.json` 审核维护。程序仍优先读取 GitHub 贡献者接口，失败时读取该快照；main 中的 `docs/contributors.json` 通过同步 PR 保持兼容。赞助名单 `docs/sponsors.json` 仍在 main 人工维护。
 便携版没有安装记录，只下载不安装。
 
 安装日志在 `%LOCALAPPDATA%\AFMediaBar\updates\install-<版本>.log`；已下载的安装包放在同一目录，并在下次启动时按版本清理。
