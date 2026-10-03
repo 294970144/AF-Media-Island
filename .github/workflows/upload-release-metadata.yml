@@ -1,0 +1,52 @@
+# Also copied into the isolated branch at bootstrap; publishes reviewed metadata and proposes legacy compatibility.
+name: Sync Release Metadata
+on:
+  push:
+    branches: [release-metadata]
+    paths: ['release/**', '.github/workflows/**']
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: deliver-release-metadata
+  cancel-in-progress: false
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout metadata
+        uses: actions/checkout@v6
+        with:
+          ref: release-metadata
+          path: metadata
+      - name: Checkout compatibility branch and publishing tools
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          path: source
+          token: ${{ secrets.METADATA_TOKEN || github.token }}
+      - name: Stage stable compatibility manifest
+        id: stable
+        shell: pwsh
+        run: |
+          $stable = Get-Content metadata/release/latest.json -Raw | ConvertFrom-Json
+          $legacy = Get-Content source/docs/latest.json -Raw | ConvertFrom-Json
+          if ([version]$stable.version -lt [version]$legacy.version) { throw 'Refusing to downgrade the legacy update channel.' }
+          Copy-Item metadata/release/latest.json source/docs/latest.json -Force
+          "version=$($stable.version)" >> $env:GITHUB_OUTPUT
+      - name: Propose legacy manifest synchronization
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.METADATA_TOKEN || github.token }}
+          path: source
+          base: main
+          branch: codex/sync-stable-release-metadata
+          delete-branch: true
+          add-paths: docs/latest.json
+          title: Sync stable update manifest ${{ steps.stable.outputs.version }}
+          commit-message: Sync stable update manifest ${{ steps.stable.outputs.version }}
+          body: |
+            Copy of the reviewed stable manifest from release-metadata/release/latest.json.
+            Merge this PR to deliver updates to older clients whose endpoints still point to main/docs/latest.json.
+            No package URL, size or checksum needs to be entered manually.

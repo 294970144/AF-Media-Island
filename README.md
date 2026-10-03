@@ -64,7 +64,7 @@ flowchart LR
 
 ### 更新
 
-程序启动约 20 秒后读取公开版本清单（`docs/latest.json`）。发现新版本时：托盘图标弹出一次系统通知，点击直接打开「应用」页。
+程序启动约 20 秒后读取独立 `release-metadata` 分支上的稳定版本清单（`release/latest.json`）。发现新版本时：托盘图标弹出一次系统通知，点击直接打开「应用」页。清单由发布 Action 自动生成，经审核和稳定版晋级后生效；旧客户端通过自动同步 PR 更新的 `main/docs/latest.json` 获取同一份稳定清单。发布配置见 [发布流程](docs/release-ci.md)。
 便携版没有安装记录，只下载不安装。
 
 安装日志在 `%LOCALAPPDATA%\AFMediaBar\updates\install-<版本>.log`；已下载的安装包放在同一目录，并在下次启动时按版本清理。
@@ -83,7 +83,7 @@ Remove-Item "$env:LOCALAPPDATA\AFMediaBar" -Recurse -Force
 ## 隐私与安全
 
 - 不包含遥测、广告、账号系统或联网分析代码；媒体信息、系统指标与音量操作全部在本机处理。
-- 更新检查只请求两个公开清单端点（`raw.githubusercontent.com` 与 jsDelivr 上的 `docs/latest.json`）。
+- 更新检查只请求两个公开清单端点（`raw.githubusercontent.com` 与 jsDelivr 上的 `release-metadata/release/latest.json`）。
 - 歌词优先搜索 QQ 音乐并请求其在线歌词接口，结果达到 75 分直接采用；否则保留 QQ 结果并发查询备用源。当前播放器对应的已启用歌词源返回结果时，不限制分数直接采用；对应源未启用、请求失败或未返回结果时按最高分选择，同分优先 QQ。联网检索使用曲名、歌手等元数据；同一来源可能包含搜索与正文获取等多次请求，歌词来源可在设置中关闭。
 - 程序以当前用户权限运行，不请求管理员权限。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
 
