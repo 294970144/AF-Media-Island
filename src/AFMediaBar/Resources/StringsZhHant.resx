@@ -217,6 +217,9 @@
   <data name="About.Status.SaveDefaultsFailed" xml:space="preserve">
     <value>無法儲存預設設定：{0}</value>
   </data>
+  <data name="About.Status.StartupUnknown" xml:space="preserve">
+    <value>無法核實開機啟動項。開關保留原設定，實際登記狀態未知。</value>
+  </data>
   <data name="About.Status.StartupFailed" xml:space="preserve">
     <value>無法修改啟動項目：{0}</value>
   </data>
@@ -627,6 +630,9 @@
   </data>
   <data name="Common.ResetDialog.Confirm" xml:space="preserve">
     <value>還原</value>
+  </data>
+  <data name="Common.ResetDialog.AllContent" xml:space="preserve">
+    <value>將所有頁面的設定還原為目前儲存的預設值；若未儲存，則還原為程式內建預設值。</value>
   </data>
   <data name="Common.ResetDialog.Content" xml:space="preserve">
     <value>將重設「{0}」中的全部選項，其他頁面與目前播放不受影響。</value>

@@ -217,6 +217,9 @@
   <data name="About.Status.SaveDefaultsFailed" xml:space="preserve">
     <value>Could not save the defaults: {0}</value>
   </data>
+  <data name="About.Status.StartupUnknown" xml:space="preserve">
+    <value>Unable to verify the startup registration. The switch retains your saved setting; the actual registration state is unknown.</value>
+  </data>
   <data name="About.Status.StartupFailed" xml:space="preserve">
     <value>Could not change the startup entry: {0}</value>
   </data>
@@ -627,6 +630,9 @@
   </data>
   <data name="Common.ResetDialog.Confirm" xml:space="preserve">
     <value>Restore</value>
+  </data>
+  <data name="Common.ResetDialog.AllContent" xml:space="preserve">
+    <value>Settings on all pages will be restored to your saved defaults, or to the built-in defaults if you have not saved any.</value>
   </data>
   <data name="Common.ResetDialog.Content" xml:space="preserve">
     <value>Every option inside "{0}" is reset; other pages and the current playback are not affected.</value>
