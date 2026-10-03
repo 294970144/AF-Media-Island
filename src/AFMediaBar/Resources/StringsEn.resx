@@ -217,6 +217,9 @@
   <data name="About.Status.SaveDefaultsFailed" xml:space="preserve">
     <value>Could not save the defaults: {0}</value>
   </data>
+  <data name="About.Status.StartupUnknown" xml:space="preserve">
+    <value>Unable to verify the startup registration. The switch retains your saved setting; the actual registration state is unknown.</value>
+  </data>
   <data name="About.Status.StartupFailed" xml:space="preserve">
     <value>Could not change the startup entry: {0}</value>
   </data>

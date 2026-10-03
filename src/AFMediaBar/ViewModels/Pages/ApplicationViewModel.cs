@@ -146,6 +146,8 @@ namespace AFMediaBar.ViewModels.Pages
         private void OnLanguageChanged(object? sender, EventArgs e)
         {
             ApplyState(_updateService.CurrentState);
+            if (_startupRegistration.RegistrationStateUnknown && _startupRegistration.LastFailure is null)
+                StartupStatusText = Translations.Get("About.Status.StartupUnknown");
             OnPropertyChanged(string.Empty);
         }
 
@@ -199,7 +201,7 @@ namespace AFMediaBar.ViewModels.Pages
             SettingsManager.Current.Update = SettingsManager.Current.Update with { SkippedVersion = null };
 
         /// <summary>
-        /// 随 Windows 登录自动启动。服务统一响应设置变化并同步注册表；失败时恢复原值并通知本页。
+        /// 随 Windows 登录自动启动。启动时服务先将实际 Run 登记同步到设置；后续修改写入注册表，失败时回退并通知本页。
         /// </summary>
         public bool LaunchAtStartup
         {
@@ -218,7 +220,9 @@ namespace AFMediaBar.ViewModels.Pages
         {
             StartupStatusText = _startupRegistration.LastFailure is { } failure
                 ? Translations.Format("About.Status.StartupFailed", failure)
-                : string.Empty;
+                : _startupRegistration.RegistrationStateUnknown
+                    ? Translations.Get("About.Status.StartupUnknown")
+                    : string.Empty;
             OnPropertyChanged(nameof(LaunchAtStartup));
         }
 

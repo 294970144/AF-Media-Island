@@ -217,6 +217,9 @@
   <data name="About.Status.SaveDefaultsFailed" xml:space="preserve">
     <value>无法保存默认设置：{0}</value>
   </data>
+  <data name="About.Status.StartupUnknown" xml:space="preserve">
+    <value>无法核实开机启动项。开关保留原设置，实际登记状态未知。</value>
+  </data>
   <data name="About.Status.StartupFailed" xml:space="preserve">
     <value>无法修改启动项：{0}</value>
   </data>

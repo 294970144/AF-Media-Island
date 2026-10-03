@@ -14,31 +14,49 @@ namespace AFMediaBar.Classes.Services;
 public sealed class StartupRegistrationService : IDisposable
 {
     private readonly Func<bool, string?> _applyRegistration;
+    private readonly Func<bool?> _readRegistration;
     private bool _started;
     private bool _disposed;
     private bool _applying;
     private bool _previousValue;
 
     /// <summary>创建启动项服务；由组合根启动，DI 容器释放设置订阅。</summary>
-    public StartupRegistrationService() => _applyRegistration = Apply;
+    public StartupRegistrationService()
+    {
+        _applyRegistration = Apply;
+        _readRegistration = IsRegistered;
+    }
 
-    internal StartupRegistrationService(Func<bool, string?> applyRegistration) => _applyRegistration = applyRegistration;
+    internal StartupRegistrationService(Func<bool, string?> applyRegistration, Func<bool?> readRegistration)
+    {
+        _applyRegistration = applyRegistration;
+        _readRegistration = readRegistration;
+    }
 
     /// <summary>最近一次登记失败的原因；成功时为 null。</summary>
     public string? LastFailure { get; private set; }
 
+    /// <summary>启动时无法读取登记状态，且后续尚未成功应用用户选择。</summary>
+    public bool RegistrationStateUnknown { get; private set; }
+
     /// <summary>登记完成或失败回退后通知设置页刷新状态。</summary>
     public event EventHandler? StateChanged;
 
-    /// <summary>加载设置后核对启动项，并订阅后续修改和整体重置。</summary>
+    /// <summary>加载设置后读取实际登记状态同步到设置，并订阅后续修改和整体重置。</summary>
     public string? Start()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_started) return LastFailure;
+        var registered = _readRegistration();
+        RegistrationStateUnknown = registered is null;
+        // 必须先同步、再订阅，避免读取到的实际状态触发一次注册表写入。
+        // 无法读取时保留用户设置，但由设置页明确提示状态未经核实。
+        if (registered is { } actual)
+            SettingsManager.Current.LaunchAtStartup = actual;
         _previousValue = SettingsManager.Current.LaunchAtStartup;
-        LastFailure = _applyRegistration(_previousValue);
         SettingsManager.SettingsChanged += OnSettingsChanged;
         _started = true;
+        StateChanged?.Invoke(this, EventArgs.Empty);
         return LastFailure;
     }
 
@@ -56,7 +74,10 @@ public sealed class StartupRegistrationService : IDisposable
             var requested = SettingsManager.Current.LaunchAtStartup;
             LastFailure = _applyRegistration(requested);
             if (LastFailure is null)
+            {
                 _previousValue = requested;
+                RegistrationStateUnknown = false;
+            }
             else
                 SettingsManager.Current.LaunchAtStartup = _previousValue;
         }

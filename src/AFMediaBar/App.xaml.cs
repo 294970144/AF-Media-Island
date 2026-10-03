@@ -297,10 +297,8 @@ namespace AFMediaBar
             // from the user's own file.
             Services.GetRequiredService<LocalizationService>().Start();
 
-            // 开机自动启动：加载后核对登记，并由服务订阅后续设置修改和整体重置。
-            // 只写 HKCU，不提权；写失败只记录原因，不影响启动链。
-            // Run-at-startup: reconcile the loaded settings and subscribe to subsequent changes and resets.
-            // Only HKCU is written and no elevation is requested; a failure is only logged and never disturbs startup.
+            // 开机自动启动：加载后读取 HKCU Run 登记同步到设置，后续用户修改和整体重置才写登记。
+            // Run-at-startup: read the HKCU Run entry into settings; only later user changes and resets write registration.
             var startupRegistration = Services.GetRequiredService<StartupRegistrationService>();
             var startupFailure = startupRegistration.Start();
             if (startupFailure is not null)

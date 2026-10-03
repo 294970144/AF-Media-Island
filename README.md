@@ -27,7 +27,9 @@ AF Media Bar 是一款便携式 Windows 10/11 任务栏媒体控制器。它从�
 前往 [GitHub Releases](https://github.com/Fervent-Tempo/AF-Media-Bar/releases)，选择一种方式：
 
 1. **安装程序（推荐）：** 下载 `AFMediaBar-Setup-vX.Y.Z-win-x64.exe`，运行向导并选择语言、安装位置及当前用户/所有用户。默认安装位置为 `%LOCALAPPDATA%\Programs\AFMediaBar`；安装版支持程序内检查、下载与安装更新。
-2. **便携版：** 下载 `AFMediaBar-vX.Y.Z-win-x64.zip`，解压到长期保留且可写的目录（如 `D:\AFMediaBar`），运行其中的 `AFMediaBar.exe`。便携版不写注册表，更新时手动替换文件。
+2. **便携版：** 下载 `AFMediaBar-vX.Y.Z-win-x64.zip`，解压到长期保留且可写的目录（如 `D:\AFMediaBar`），运行其中的 `AFMediaBar.exe`。便携版更新时手动替换文件；开启开机自启动会写入当前用户的注册表启动项。
+
+**开机自启动：** 每次启动会按当前路径的 Run 登记状态同步「应用」页开关；启动项缺失或指向旧路径时显示关闭，不会自动修复，需要手动开启。无法读取时保留原设置并提示状态未知。修改开关或恢复全部默认设置会应用相应的登记选择。该状态不包含 Windows 的启动项禁用状态，程序不会撤销 Windows 中的禁用；程序未运行时被移动，也无法自行修复旧启动项。
 
 **系统要求：** Windows 10 1809（内部版本 17763）或更新的 x64 系统，并需要 Microsoft Edge WebView2 Runtime。Windows 11 与仍受支持的 Windows 10 通常已预装；精简系统若缺失，需先安装 Evergreen Runtime。两种包都自带 .NET 运行时，不需要另行安装。程序用到的系统接口可在 1809 使用，但 **.NET 10 官方仅支持 Windows 10 的长期服务版与企业版**（1809 E、21H2 E）；消费版 Windows 10 不在 Microsoft 的支持范围内。Windows 11 不受此限制。
 
