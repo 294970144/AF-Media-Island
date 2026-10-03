@@ -60,6 +60,16 @@ public partial class IslandWindow : FluentWindow
     // beat stays with the spring and the marquee.
     private static readonly TimeSpan PresenceProbeInterval = TimeSpan.FromMilliseconds(450);
 
+    /// <summary>
+    /// 一次悬停采样允许计入的最大时间跨度（毫秒）。超过它说明这一拍之前漏过采样——帧节拍刚起来、
+    /// 系统刚休眠唤醒、或 UI 线程刚卡了一段——中间那段空白并不是「指针停留」。按此上限计入，
+    /// 停留计时只会偏慢，绝不会抢跑。
+    /// Ceiling on the time one hover sample may count. Anything larger means samples were missed in between: the
+    /// frame beat has only just started, the machine just woke, or the UI thread stalled. The gap in between was
+    /// not the pointer lingering, so it is capped — dwell may lag behind, never fire early.
+    /// </summary>
+    private const double MaxHoverStepMilliseconds = 60d;
+
     private readonly DispatcherTimer _presenceProbe;
     private DateTimeOffset _lastHoverSampleAt = DateTimeOffset.MinValue;
 
@@ -154,8 +164,20 @@ public partial class IslandWindow : FluentWindow
         };
         SizeChanged += (_, _) => ApplyCapsuleRegion();
 
+        // 指针进出必须有事件源。悬停计时原本只挂在 450ms 的低频探针上，于是「发现指针已经进来了」
+        // 这件事本身就要等半拍，而那一拍会被当成停留时间一次性喂进 dwell——220ms 的阈值形同虚设，
+        // 真实延迟是与探针周期同宽的 0~450ms 随机数。事件负责「立刻开始计时」，16ms 采样负责「计时准确」。
+        // Pointer enter/leave needs an event source. The dwell clock used to ride the 450 ms probe alone, so merely
+        // noticing "the pointer arrived" cost half a tick — and that tick was fed to the dwell in one gulp, leaving
+        // the 220 ms threshold meaningless: real latency became a 0–450 ms random value locked to the probe period.
+        // The event starts the clock at once; the 16 ms sampling keeps it honest.
+        MouseEnter += OnIslandMouseEnter;
+        MouseLeave += OnIslandMouseLeave;
+
         Closed += (_, _) =>
         {
+            MouseEnter -= OnIslandMouseEnter;
+            MouseLeave -= OnIslandMouseLeave;
             if (_hwndSource is not null)
             {
                 _hwndSource.RemoveHook(OnWindowMessage);
@@ -198,6 +220,12 @@ public partial class IslandWindow : FluentWindow
         // The lyric may already be too wide, so start the beat to let the marquee scroll right away.
         StartFrameTimer();
         StartPresenceProbe();
+        // 指针一开始就可能已经压在这颗刚长出来的岛体上，而 WPF 不会为「窗口自己移到指针底下」
+        // 补发 MouseEnter。探针也不再喂悬停，缺了这一下计时永远不会起步。
+        // The pointer may already rest on this just-created island, and WPF does not synthesise MouseEnter for a
+        // window that moved itself under the cursor. With the probe no longer feeding hover, skipping this call
+        // would leave the dwell clock permanently unstarted.
+        SampleHover();
     }
 
     /// <summary>隐藏岛体并停掉状态源；窗口实例保留，供显示模式页或协调器再次唤起。 / Hides the island and stops its state source; the instance stays alive for re-showing.</summary>
@@ -212,16 +240,16 @@ public partial class IslandWindow : FluentWindow
     }
 
     /// <summary>
-    /// 低频探针的一拍：先判可见性（无播放 / 前台全屏则整个藏起来），再喂悬停停留计时。
-    /// A presence probe tick: it first settles visibility (tuck away entirely when nothing plays or the foreground is
-    /// fullscreen), then feeds the hover dwell timing.
+    /// 低频探针的一拍：只判可见性（无播放 / 前台全屏则整个藏起来）。
+    /// A presence probe tick: it settles visibility and nothing else (tuck away entirely when nothing plays or the
+    /// foreground is fullscreen).
     /// </summary>
     private void OnPresenceProbeTick(object? sender, EventArgs e)
     {
-        var now = DateTimeOffset.UtcNow;
-        var elapsed = now - _lastHoverSampleAt;
-        _lastHoverSampleAt = now;
-
+        // 悬停计时不在这里：450ms 的节拍撑不起 220ms 的 dwell 分辨率，它已移到 16ms 的帧节拍
+        // （<see cref="SampleHover"/>），由 MouseEnter/MouseLeave 起表。原因见事件订阅处的说明。
+        // Hover timing is not done here: a 450 ms beat cannot resolve a 220 ms dwell. It moved onto the 16 ms frame
+        // beat (SampleHover), started by MouseEnter/MouseLeave — see the note where those handlers are wired.
         // 可见性要在悬停之前判：窗口被藏起来时，悬停状态已经没有意义了。
         // Visibility comes before hover: once the window is tucked away, hover state is meaningless.
         _visibility.Update(_viewModel.IsConnected, _displayMonitorService.IsForegroundWindowFullscreen());
@@ -243,11 +271,45 @@ public partial class IslandWindow : FluentWindow
         // ViewModel.Start, placement and the probe — the symptom being an island that returns but stops updating.
         if (!IsVisible)
             ShowIsland();
+    }
 
-        // 形态只有一个写入者：按悬停策略给出的目标态设定，绝不自己取反。
-        // The shape has exactly one writer: it is set from the hover policy's target and never inverted here.
-        _hover.Update(IsMouseOver, elapsed);
+    /// <summary>指针进入岛体：立刻开始停留计时，不等探针。 / Pointer entered the island: start the dwell clock now instead of waiting for the probe.</summary>
+    private void OnIslandMouseEnter(object sender, MouseEventArgs e) => SampleHover();
+
+    /// <summary>指针离开岛体：立刻开始反向计时。 / Pointer left the island: start counting the other way at once.</summary>
+    private void OnIslandMouseLeave(object sender, MouseEventArgs e) => SampleHover();
+
+    /// <summary>
+    /// 抓一次悬停样本并推进停留计时，由 16ms 的帧节拍与指针进出事件共同驱动。
+    /// 形态只有一个写入者：目标态来自悬停策略，这里绝不自作主张把当前形态取反。
+    /// Takes one hover sample and advances the dwell clock, driven by both the 16 ms frame beat and the pointer
+    /// enter/leave events. The shape has exactly one writer: the target comes from the hover policy and is never
+    /// inverted here.
+    /// </summary>
+    private void SampleHover()
+    {
+        // 窗口藏着的时候指针进出的结论毫无意义，也不会有意外的 MouseEnter 落进来。
+        // While the window is hidden nothing about pointer presence matters, and stray enter events would only mislead.
+        if (!IsVisible)
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        var elapsedMilliseconds = (now - _lastHoverSampleAt).TotalMilliseconds;
+        _lastHoverSampleAt = now;
+
+        // 负跨度（时钟被回拨）与非有限值都按零计：宁可慢一拍，也不能凭一个假数字提前触发。
+        // Negative spans (the clock stepped back) and non-finite ones count as zero: a late hover beats one that
+        // fires on a bogus number.
+        if (!double.IsFinite(elapsedMilliseconds) || elapsedMilliseconds < 0d)
+            elapsedMilliseconds = 0d;
+
+        _hover.Update(IsMouseOver, TimeSpan.FromMilliseconds(Math.Min(elapsedMilliseconds, MaxHoverStepMilliseconds)));
         SetExpanded(_hover.ShouldExpand);
+
+        // 计时未决时必须让节拍继续跑：停了就再没有人为它计时，这次展开会永远停在「差半拍」的位置。
+        // An undecided dwell has to keep the beat alive; stopping it strands the clock one tick short forever.
+        if (_hover.PendingMilliseconds > 0d)
+            StartFrameTimer();
     }
 
     /// <summary>
@@ -617,6 +679,10 @@ public partial class IslandWindow : FluentWindow
         var elapsed = now - _lastFrameAt;
         _lastFrameAt = now;
 
+        // 停留计时的分辨率就挂在这条 16ms 的节拍上：220ms 的 dwell 才真的是 220ms。
+        // The dwell clock's resolution rides this 16 ms beat, so a 220 ms dwell really is 220 ms.
+        SampleHover();
+
         if (!_heightSpring.IsSettled)
         {
             _heightSpring.Advance(elapsed);
@@ -820,7 +886,9 @@ public partial class IslandWindow : FluentWindow
 
     private void StopFrameTimerIfIdle()
     {
-        if (_heightSpring.IsSettled && !_marquee.Advancing)
+        // dwell 未决时不能停表：没有人为它计时，这次展开就永远停在「差半拍」上再也不涨。
+        // A pending dwell must not idle the beat: nobody would be left to clock it and it would sit one tick short.
+        if (_heightSpring.IsSettled && !_marquee.Advancing && _hover.PendingMilliseconds <= 0d)
             _frameTimer.Stop();
     }
 
