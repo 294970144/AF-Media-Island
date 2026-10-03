@@ -191,4 +191,91 @@ public sealed class IslandSpringMotionTests
 
         Assert.IsTrue(ahead >= spring.Position, "负的时间间隔不应让弹簧倒退");
     }
+
+    /// <summary>
+    /// 窗高不像卡片那样「有重量」：行程 190 DIP 上 ζ=0.65 过冲约 12.9 DIP 再回落，肉眼读到的是明确的
+    /// 回弹，而不是「活气」。这里把设计窗口钉成 [0.5, 5.7] DIP——足以看出不是线性补间，
+    /// 又不至于看成一次弹跳。上界正是本次调参要守的东西：有人把阻尼调回 0.65 时它会立刻变红。
+    /// A window height carries no visible weight: across a 190 DIP throw, ζ=0.65 overshoots ~12.9 DIP and settles
+    /// back, which reads as a bounce rather than liveliness. The window is pinned here to [0.5, 5.7] DIP — enough
+    /// to show the motion is not a linear tween, little enough not to read as a bounce. The upper bound is what
+    /// this retune actually guards: it turns red the moment someone dials damping back to 0.65.
+    /// </summary>
+    [TestMethod]
+    public void FullMotionOvershootStaysTooSmallToReadAsABounce()
+    {
+        const double throwDip = 236d - 46d;
+
+        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        spring.Retarget(236d);
+
+        var peak = spring.Position;
+        while (!spring.IsSettled)
+        {
+            spring.Advance(Frame);
+            peak = Math.Max(peak, spring.Position);
+        }
+
+        Assert.IsTrue(peak > 236d + 0.5d, $"至少要留出看得见的过冲，实际峰值 {peak:F2} DIP");
+        Assert.IsTrue(peak < 236d + (throwDip * 0.03), $"过冲不能超过行程的 3%，实际峰值 {peak:F2} DIP");
+    }
+
+    /// <summary>
+    /// 展开全高度要在一次呼吸内跑完：尾巴拖太久会让它看起来像卡住而不是曲线。
+    /// A full-height expansion must finish within one breath; a long tail reads as stalling rather than easing.
+    /// </summary>
+    [TestMethod]
+    public void FullHeightThrowSettlesWellInsideASecond()
+    {
+        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        spring.Retarget(236d);
+
+        var frames = RunToRest(spring, 600);
+
+        // 600 帧的上限是 9.6 秒，只用来兜住「永远不收敛」；真正的意图是它在半秒量级就该结束。
+        // The 600-frame cap is 9.6 s and only catches "never converges"; the intent is that it ends in half a second.
+        Assert.IsTrue(frames * 16d < 600d, $"全高度展开用了 {frames * 16d} 毫秒才静止，尾巴太长");
+    }
+
+    /// <summary>
+    /// 「减少动效」减的是「动」，不是竞速：降级档必须比完整档更温和，而不是单纯比它更早停下。
+    /// 峰值速度是这条语义最直接的量度。
+    /// 这里刻意不写「降级更快」。那句话听起来天经地义，实测却是反的——完整档 27 帧静止、降级档 34 帧。
+    /// 原因不难：完整档 ζ=0.8 的那 1.5% 过冲只需多走小半个来回就还清，而临界阻尼的尾巴按 e^(-ωt)
+    /// 拖得更久。但「更早停下」本来就不该是降级档的追求——若为了赢这一个指标把降级档调陡，
+    /// 起步速度反而会超过完整档，把更强的视觉冲击丢给一个明确要求少动的用户，那是南辕北辙。
+    /// "Reduced motion" reduces motion, it is not a race: the reduced tier must be gentler than the full one, not
+    /// merely earlier to rest. Peak speed measures that directly. It deliberately does not claim "reduced is
+    /// quicker" — that reads self-evident and is backwards in practice: full settles in 27 frames, reduced in 34.
+    /// The reason is plain, since full's 1.5% overshoot is paid off in barely half an extra round-trip while
+    /// critical damping drags a longer e^(-ωt) tail. But resting sooner was never the point of the reduced tier:
+    /// steepening it to win that metric would make it launch harder than the full tier, handing a stronger visual
+    /// jolt to the very user who asked for less motion.
+    /// </summary>
+    [TestMethod]
+    public void ReducedMotionNeverMovesHarderThanFullMotion()
+    {
+        var full = SpringMotion.ForProfile(
+            new MotionProfile(MotionMode.Full, default, default, default, default, default, false, false), 46d);
+        full.Retarget(236d);
+        var fullPeak = 0d;
+        while (!full.IsSettled)
+        {
+            full.Advance(Frame);
+            fullPeak = Math.Max(fullPeak, Math.Abs(full.Velocity));
+        }
+
+        var reduced = SpringMotion.ForProfile(
+            new MotionProfile(MotionMode.Reduced, default, default, default, default, default, false, false), 46d);
+        reduced.Retarget(236d);
+        var reducedPeak = 0d;
+        while (!reduced.IsSettled)
+        {
+            reduced.Advance(Frame);
+            reducedPeak = Math.Max(reducedPeak, Math.Abs(reduced.Velocity));
+        }
+
+        Assert.IsTrue(reducedPeak <= fullPeak,
+            $"降级动效的峰值速度不应超过完整档：降级 {reducedPeak:F0}，完整 {fullPeak:F0} DIP/s");
+    }
 }
