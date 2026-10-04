@@ -174,10 +174,16 @@ public partial class IslandWindow : FluentWindow
         MouseEnter += OnIslandMouseEnter;
         MouseLeave += OnIslandMouseLeave;
 
+        // 手感参数热重载：文件监听在后台线程上，弹簧与悬停计时都在 UI 线程上，因此切回去再落地。
+        // Hot reload of the feel parameters: the file watcher runs on a background thread while the spring and the
+        // dwell counter live on the UI thread, so the update is marshalled back before it lands.
+        IslandMotionTuning.Current.Changed += OnMotionTuningChanged;
+
         Closed += (_, _) =>
         {
             MouseEnter -= OnIslandMouseEnter;
             MouseLeave -= OnIslandMouseLeave;
+            IslandMotionTuning.Current.Changed -= OnMotionTuningChanged;
             if (_hwndSource is not null)
             {
                 _hwndSource.RemoveHook(OnWindowMessage);
@@ -228,7 +234,13 @@ public partial class IslandWindow : FluentWindow
         SampleHover();
     }
 
-    /// <summary>隐藏岛体并停掉状态源；窗口实例保留，供显示模式页或协调器再次唤起。 / Hides the island and stops its state source; the instance stays alive for re-showing.</summary>
+    /// <summary>
+    /// 彻底收起岛体：停掉状态源**与可见性探针**。只有「用户切走了显示模式」才配得上这条路径——
+    /// 协调器（显示模式页、<c>--island</c>）调它，因为用户已经明确表示不想看岛了，探针留着也只是空转。
+    /// 彻底停探针。 / Hides the island for good: stops the state source <b>and the presence probe</b>. Only a display-mode
+    /// switch earns this path, via the coordinator, because the user has said they do not want the island and a live probe
+    /// would only spin.
+    /// </summary>
     public void HideIsland()
     {
         Hide();
@@ -237,6 +249,52 @@ public partial class IslandWindow : FluentWindow
         // Nothing needs advancing while hidden: stop the beat so it does not spin at 60 Hz behind a hidden window.
         _frameTimer.Stop();
         _presenceProbe.Stop();
+    }
+
+    /// <summary>
+    /// 临时收起岛体，**保留可见性探针**，让岛体能在条件恢复时自己回来。
+    ///
+    /// 这里是「播放一会儿就再也不出现」那个 bug 的修法。可见性判定此前经 <see cref="HideIsland"/> 收起，而那条
+    /// 路径会把探针一起停掉——探针正是唯一能把岛体重新唤起的东西（<see cref="OnPresenceProbeTick"/> 末尾的
+    /// <c>if (!IsVisible) ShowIsland()</c>）。于是任何一次误判隐藏都是**单向棘轮**：岛体再也回不来，
+    /// 只能由用户在设置里手动开关一次重走协调器。
+    ///
+    /// 误判很容易发生：启动时 SMTC 会话目录尚未就绪，看门狗的首次探测与随后的目录重建期间会发布一串
+    /// 断连快照（<c>RefreshSnapshot</c> 里 <c>session is null || !_catalog.IsStarted</c> 走的就是
+    /// <c>Publish(MediaSnapshot.Disconnected)</c>）。三连采样只要 1.35 秒，一次启动期的假断连就足以判隐藏。
+    /// 那个窗口只出现在冷启动，之后目录已热不会再重建，所以症状精确地表现为「仅限启动后第一次」。
+    ///
+    /// 这条路径把三种「隐藏」区分开：判定隐藏是可逆的（保留探针），切走模式才是终态（停探针）。
+    /// Temporarily hides the island while <b>keeping the probe alive</b>, so the island can return on its own when the
+    /// condition clears.
+    ///
+    /// <para>
+    /// This is the fix for "it closes after a bit of playback and never comes back". Visibility used to hide through
+    /// <see cref="HideIsland"/>, which also stopped the probe — and the probe is the only thing that can bring the island
+    /// back (the <c>if (!IsVisible) ShowIsland()</c> at the end of <see cref="OnPresenceProbeTick"/>). Any mistaken hide
+    /// was therefore a <b>one-way ratchet</b>: the island could never return on its own, and only a manual toggle in the
+    /// display-modes page could revive it through the coordinator.
+    ///
+    /// <para>
+    /// The mistaken verdict is easy to hit at startup: the SMTC catalog is not ready yet, and the watchdog's first probe
+    /// plus the catalog rebuild that may follow publish a run of disconnected snapshots. Three agreeing samples take only
+    /// 1.35 s, so one startup-time false disconnect is enough. That window exists only on a cold start — the catalog is
+    /// warm afterwards and stops rebuilding — which is exactly why the symptom shows up on the first launch only.
+    ///
+    /// <para>
+    /// This path is what separates the three kinds of hiding: a verdict is reversible (probe stays on), while switching
+    /// away from the mode is terminal (probe stops).
+    /// </para>
+    /// </para>
+    /// </summary>
+    private void SuspendIsland()
+    {
+        Hide();
+        _viewModel.Stop();
+        // 只停 16ms 帧节拍：隐藏后没有弹簧与跑马灯要推进，但可见性探针必须留着，它是唯一的自愈路径。
+        // Only the 16 ms beat stops: with the window hidden there is no spring or marquee to advance, but the probe must
+        // stay on because it is the only route back.
+        _frameTimer.Stop();
     }
 
     /// <summary>
@@ -258,8 +316,13 @@ public partial class IslandWindow : FluentWindow
             // 藏起来时顺手把锁定解开，否则用户回来后岛体会莫名其妙停在展开态。
             // Drop the pin while hidden, otherwise the island reappears stuck open for no visible reason.
             _hover.Reset();
+            // 走可逆的那条：判定隐藏必须还能自愈。原先这里调 HideIsland，把探针一起停了，
+            // 而探针是唯一能把岛体唤回来的东西——于是任何一次误判都是单向棘轮。
+            // This takes the reversible path: a visibility verdict must stay able to heal. It used to call
+            // HideIsland, which stopped the probe as well — and the probe is the only thing that can bring the island
+            // back, so any mistaken verdict became a one-way ratchet.
             if (IsVisible)
-                HideIsland();
+                SuspendIsland();
             return;
         }
 
@@ -278,6 +341,34 @@ public partial class IslandWindow : FluentWindow
 
     /// <summary>指针离开岛体：立刻开始反向计时。 / Pointer left the island: start counting the other way at once.</summary>
     private void OnIslandMouseLeave(object sender, MouseEventArgs e) => SampleHover();
+
+    /// <summary>
+    /// 手感参数文件被改动后把新参数落到正在跑的弹簧与悬停计时上。
+    /// 弹簧用 <see cref="SpringMotion.Retune"/> 换参数而不是重建：重建会把位置与速度清零，一次改参数的
+    /// 动作本身就成了可见的跳变；带着当前速度换参数，动画才会平滑地改用新脾气。
+    /// Lands new parameters on the running spring and dwell clock after the feel file changed. The spring is retuned
+    /// rather than rebuilt: rebuilding zeroes position and velocity, which turns the parameter change itself into a
+    /// visible jump; retuning carries the current velocity so the motion smoothly takes on its new temperament.
+    /// </summary>
+    private void OnMotionTuningChanged(object? sender, EventArgs e)
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            ApplyMotionTuning();
+            return;
+        }
+
+        Dispatcher.Invoke(ApplyMotionTuning);
+    }
+
+    private void ApplyMotionTuning()
+    {
+        _hover.RefreshDelays();
+        var tuning = IslandMotionTuning.Current;
+        _heightSpring.Retune(
+            _motion.Mode == MotionMode.Reduced ? tuning.ReducedStiffness : tuning.FullStiffness,
+            _motion.Mode == MotionMode.Reduced ? tuning.ReducedDamping : tuning.FullDamping);
+    }
 
     /// <summary>
     /// 抓一次悬停样本并推进停留计时，由 16ms 的帧节拍与指针进出事件共同驱动。

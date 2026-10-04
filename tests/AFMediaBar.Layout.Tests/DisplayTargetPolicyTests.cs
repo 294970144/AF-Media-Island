@@ -115,10 +115,51 @@ public sealed class DisplayTargetPolicyTests
     public void FullscreenCoverageAllowsSmallFrameToleranceOnly()
     {
         var monitor = new Rect(-1920, 0, 1920, 1080);
-        Assert.IsTrue(ForegroundFullscreenPolicy.IsFullscreen(new Rect(-1921, -1, 1922, 1082), monitor));
-        Assert.IsTrue(ForegroundFullscreenPolicy.IsFullscreen(new Rect(-1919, 1, 1918, 1078), monitor));
-        Assert.IsFalse(ForegroundFullscreenPolicy.IsFullscreen(new Rect(-1900, 20, 1880, 1040), monitor));
-        Assert.IsFalse(ForegroundFullscreenPolicy.IsFullscreen(Rect.Empty, monitor));
+        Assert.IsTrue(ForegroundFullscreenPolicy.IsFullscreen(new Rect(-1921, -1, 1922, 1082), monitor, isMaximized: false));
+        Assert.IsTrue(ForegroundFullscreenPolicy.IsFullscreen(new Rect(-1919, 1, 1918, 1078), monitor, isMaximized: false));
+        Assert.IsFalse(ForegroundFullscreenPolicy.IsFullscreen(new Rect(-1900, 20, 1880, 1040), monitor, isMaximized: false));
+        Assert.IsFalse(ForegroundFullscreenPolicy.IsFullscreen(Rect.Empty, monitor, isMaximized: false));
+    }
+
+    /// <summary>
+    /// 无任务栏的显示器上，最大化与全屏的窗口矩形逐像素相同——只有窗口状态能把二者分开。
+    ///
+    /// 这条钉的是实机踩过的坑：笔记本副屏默认不显示任务栏，浏览器在副屏最大化后窗口矩形恰好等于整块屏幕，
+    /// 纯几何判据把它当成全屏，灵动岛于是收起；焦点一离开又变可见，岛体反复闪断。实测日志里媒体会话全程
+    /// <c>connected=True</c> 没断过一次，闪断期间只有任务栏 Z 序告警——纯几何判据是唯一的元凶。
+    ///
+    /// 带上 <c>isMaximized: true</c> 时必须返回 false，哪怕矩形完全覆盖显示器。
+    /// On a display with no taskbar, a maximized window and a fullscreen one have pixel-identical rectangles — only the
+    /// window state separates them.
+    ///
+    /// This pins a bug hit on real hardware: a laptop's secondary display shows no taskbar by default, so a browser
+    /// maximized there has a rectangle equal to the whole screen. The pure geometry test called that fullscreen, the
+    /// island retracted, and focus changes made it reappear — a flicker. The measured log showed the media session
+    /// <c>connected=True</c> throughout, with only a taskbar Z-order warning during the flicker: the geometry verdict
+    /// was the sole culprit.
+    ///
+    /// It must return false whenever <c>isMaximized</c> is set, even when the rectangle covers the display exactly.
+    /// </summary>
+    [TestMethod]
+    public void AMaximizedWindowIsNotFullscreenEvenWhenItCoversTheWholeDisplay()
+    {
+        var monitor = new Rect(0, 0, 2560, 1440);
+
+        // 无任务栏的副屏上，最大化就是这个矩形——与全屏无法用几何区分。
+        // On a taskbar-less secondary display, maximized is exactly this rectangle — indistinguishable from fullscreen
+        // by geometry alone.
+        var maximizedWindow = new Rect(0, 0, 2560, 1440);
+
+        Assert.IsFalse(
+            ForegroundFullscreenPolicy.IsFullscreen(maximizedWindow, monitor, isMaximized: true),
+            "最大化不是全屏播放。用户看得见标题栏与边框，不该让岛体退让。");
+
+        // 同一个矩形，不带最大化标记时才算全屏——这条保证判据没有被写死成「永不成立」。
+        // The same rectangle without the maximized flag does count as fullscreen — this keeps the test from passing
+        // simply because the verdict was hardwired to false.
+        Assert.IsTrue(
+            ForegroundFullscreenPolicy.IsFullscreen(maximizedWindow, monitor, isMaximized: false),
+            "不带最大化标记时，覆盖整块屏幕仍应判全屏，否则这条测试就只是在检查判据被写死。");
     }
 
     private static DisplayMonitorInfo Monitor(string id, bool primary, Rect workArea, uint dpi) =>

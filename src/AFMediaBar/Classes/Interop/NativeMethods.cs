@@ -351,6 +351,17 @@ public static partial class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool IsIconic(IntPtr hWnd);
 
+    /// <summary>
+    /// 判断窗口是否处于「最大化」状态。这是把最大化与全屏区分开的唯一可靠信号：二者的窗口矩形在
+    /// 无任务栏的显示器上完全相同（都等于整块屏幕），几何上无从分辨。
+    /// Determines whether a window is maximized. This is the only reliable way to tell maximized from fullscreen:
+    /// on a display with no taskbar both have window rectangles identical to the whole screen, so geometry
+    /// alone cannot separate them.
+    /// </summary>
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool IsZoomed(IntPtr hWnd);
+
     [LibraryImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
     public static partial int GetWindowLong(IntPtr hWnd, int nIndex);
 
