@@ -211,7 +211,7 @@ namespace AFMediaBar.ViewModels.Pages
                 if (SettingsManager.Current.LaunchAtStartup == value)
                     return;
 
-                SettingsManager.Current.LaunchAtStartup = value;
+                _startupRegistration.SetLaunchAtStartup(value);
                 OnPropertyChanged();
             }
         }
