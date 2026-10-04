@@ -23,20 +23,24 @@ namespace AFMediaBar.Classes.Services;
 /// (sticky) expect opposite things when the pointer leaves, and they are two sources for one state bit, so folding
 /// them into "set the target state" is what stops them from fighting.
 /// </para>
+///
+/// <para>
+/// 两个进出延迟不是常量而是实例状态，取自 <see cref="IslandMotionTuning"/>：那份表可以热重载，所以延迟得在
+/// 每次判定时读，而不是构造时抄一份。手感文件因此能改到「悬停多久才展开」而不必重启。
+/// The two delays are instance state rather than constants, read from <see cref="IslandMotionTuning"/>: that table can
+/// be hot-reloaded, so the delays are read per decision instead of copied once at construction. That is what lets the
+/// feel file change "how long the pointer must rest" without a restart.
+/// </para>
 /// </remarks>
 public sealed class IslandHoverPolicy
 {
-    /// <summary>指针进入后多久才展开（DIP 无关的时间常数，毫秒）：掠过时不该被误当成想看内容。</summary>
-    public const double ExpandDelayMilliseconds = 220;
-
-    /// <summary>指针离开后多久才收起（毫秒）：从胶囊移到面板上时不至于中途塌掉。</summary>
-    public const double CollapseDelayMilliseconds = 320;
-
     private bool _pointerInside;
     private bool _pinned;
     private bool _suppressedUntilLeave;
     private double _pendingMilliseconds;
     private bool _targetExpanded;
+    private double _expandDelayMilliseconds = IslandMotionTuning.Current.ExpandDelayMilliseconds;
+    private double _collapseDelayMilliseconds = IslandMotionTuning.Current.CollapseDelayMilliseconds;
 
     /// <summary>目标展开态：点击锁定期间恒为展开，否则跟随指针并计入进出延迟。 / The target expansion state.</summary>
     public bool ShouldExpand => _pinned || _targetExpanded;
@@ -46,6 +50,25 @@ public sealed class IslandHoverPolicy
 
     /// <summary>累计的进出延迟时长（毫秒）。 / How long the pointer has stayed on its current side.</summary>
     public double PendingMilliseconds => _pendingMilliseconds;
+
+    /// <summary>当前生效的展开延迟（毫秒），随参数热重载更新。 / The expansion delay in force, refreshed on a tuning hot reload.</summary>
+    public double ExpandDelayMilliseconds => _expandDelayMilliseconds;
+
+    /// <summary>当前生效的收起延迟（毫秒），随参数热重载更新。 / The collapse delay in force, refreshed on a tuning hot reload.</summary>
+    public double CollapseDelayMilliseconds => _collapseDelayMilliseconds;
+
+    /// <summary>
+    /// 从手感表刷新两个延迟。刻意不动已累计的 dwell：指针已经停了 100ms 时改阈值，应当按新阈值接着算，
+    /// 而不是让这一拍重新开始计时——后者会让一次改参数的动作在手底下多出半拍迟滞。
+    /// Refreshes both delays from the feel table. It deliberately leaves the accumulated dwell alone: when the pointer
+    /// has already rested for 100 ms and the threshold changes, the new threshold should continue from there rather
+    /// than restart the clock, which would add half a beat of latency to the parameter change itself.
+    /// </summary>
+    public void RefreshDelays()
+    {
+        _expandDelayMilliseconds = IslandMotionTuning.Current.ExpandDelayMilliseconds;
+        _collapseDelayMilliseconds = IslandMotionTuning.Current.CollapseDelayMilliseconds;
+    }
 
     /// <summary>
     /// 点击岛体之外：解掉锁定并立刻收起，不等收起延迟。用户点别处就是「不看了」，让面板留在原地
@@ -113,7 +136,7 @@ public sealed class IslandHoverPolicy
         // A negative delta (clock adjusted backwards) counts as zero: a slow hover beats one firing early.
         var step = Math.Max(0d, elapsed.TotalMilliseconds);
         var wanted = _pointerInside;
-        var delay = wanted ? ExpandDelayMilliseconds : CollapseDelayMilliseconds;
+        var delay = wanted ? _expandDelayMilliseconds : _collapseDelayMilliseconds;
 
         if (_targetExpanded == wanted)
         {

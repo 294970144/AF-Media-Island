@@ -24,7 +24,7 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void FreshSpringIsSettledAtItsOwnPosition()
     {
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
 
         Assert.IsTrue(spring.IsSettled);
         Assert.AreEqual(46d, spring.Position, 1e-9);
@@ -34,7 +34,7 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void RetargetToTheSameValueKeepsTheSpringAsleep()
     {
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
 
         spring.Retarget(46d);
 
@@ -44,7 +44,7 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void SpringConvergesOnItsTargetAndLandsExactly()
     {
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
         spring.Retarget(236d);
 
         var frames = RunToRest(spring);
@@ -57,7 +57,7 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void FullMotionOvershootsToMakeTheIslandBreathe()
     {
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
         spring.Retarget(236d);
 
         var peak = spring.Position;
@@ -96,7 +96,7 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void ProgressRunsFromZeroToOne()
     {
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
         spring.Retarget(246d);
 
         Assert.AreEqual(0d, spring.Progress, 1e-9, "刚离开起点时进度必须是 0");
@@ -107,7 +107,7 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void ResetToClearsVelocityAndSettlesOnTheGivenHeight()
     {
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
         spring.Retarget(236d);
         for (var i = 0; i < 5; i++)
             spring.Advance(Frame);
@@ -127,7 +127,7 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void ResetToIgnoresNonFiniteHeights()
     {
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
 
         spring.ResetTo(double.NaN);
         spring.ResetTo(double.PositiveInfinity);
@@ -138,7 +138,7 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void RetargetMidFlightKeepsVelocitySoTheSpringTurnsAround()
     {
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
         spring.Retarget(236d);
         for (var i = 0; i < 5; i++)
             spring.Advance(Frame);
@@ -158,13 +158,13 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void DroppedFrameSlowsTheSpringInsteadOfBlowingItUp()
     {
-        var steady = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var steady = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
         steady.Retarget(236d);
         var steadyFrames = RunToRest(steady);
 
         // 模拟一次 500ms 的长卡顿：结果必须有限且仍在收敛，绝不出现 NaN/Inf 或疯狂振荡。
         // A 500 ms stall: the result must stay finite and still converge, never NaN/Inf or wild oscillation.
-        var stalled = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var stalled = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
         stalled.Retarget(236d);
         var peak = stalled.Position;
         for (var i = 0; i < steadyFrames; i++)
@@ -181,7 +181,7 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void NegativeTimeDoesNotRewindTheSpring()
     {
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
         spring.Retarget(236d);
         for (var i = 0; i < 5; i++)
             spring.Advance(Frame);
@@ -193,20 +193,20 @@ public sealed class IslandSpringMotionTests
     }
 
     /// <summary>
-    /// 窗高不像卡片那样「有重量」：行程 190 DIP 上 ζ=0.65 过冲约 12.9 DIP 再回落，肉眼读到的是明确的
-    /// 回弹，而不是「活气」。这里把设计窗口钉成 [0.5, 5.7] DIP——足以看出不是线性补间，
-    /// 又不至于看成一次弹跳。上界正是本次调参要守的东西：有人把阻尼调回 0.65 时它会立刻变红。
-    /// A window height carries no visible weight: across a 190 DIP throw, ζ=0.65 overshoots ~12.9 DIP and settles
-    /// back, which reads as a bounce rather than liveliness. The window is pinned here to [0.5, 5.7] DIP — enough
-    /// to show the motion is not a linear tween, little enough not to read as a bounce. The upper bound is what
-    /// this retune actually guards: it turns red the moment someone dials damping back to 0.65.
+    /// 窗高不像卡片那样「有重量」：行程 190 DIP 上把阻尼调回 ζ=0.65 会过冲约 13 DIP 再回落，肉眼读到的是
+    /// 明确的回弹，而不是「活气」。这里把设计窗口钉成 [0.5 DIP, 行程的 3%]——足以看出不是线性补间，
+    /// 又不至于看成一次弹跳。上界是这条守着的重点：谁把阻尼调软一点，它立刻变红。
+    /// A window height carries no visible weight: across a 190 DIP throw, damping back to ζ=0.65 overshoots ~13 DIP
+    /// and settles back, which reads as a bounce rather than liveliness. The window is pinned here to [0.5 DIP, 3% of
+    /// the throw] — enough to show the motion is not a linear tween, little enough not to read as a bounce. The
+    /// ceiling is what this guards: it turns red the moment someone softens the damping.
     /// </summary>
     [TestMethod]
     public void FullMotionOvershootStaysTooSmallToReadAsABounce()
     {
         const double throwDip = 236d - 46d;
 
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
         spring.Retarget(236d);
 
         var peak = spring.Position;
@@ -227,7 +227,7 @@ public sealed class IslandSpringMotionTests
     [TestMethod]
     public void FullHeightThrowSettlesWellInsideASecond()
     {
-        var spring = new SpringMotion(46d, SpringMotion.FullStiffness, SpringMotion.FullDamping);
+        var spring = new SpringMotion(46d, IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping);
         spring.Retarget(236d);
 
         var frames = RunToRest(spring, 600);

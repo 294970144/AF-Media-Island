@@ -7,31 +7,18 @@ namespace AFMediaBar.Classes.Services;
 /// 固定步长半隐式（辛）欧拉——相比显式欧拉，它在同样的步长下能量不发散，弹簧不会自己越晃越凶。
 /// </summary>
 /// <remarks>
-/// 动效降级不靠参数硬调，而是换一组参数：完整动效用轻微欠阻尼（ζ=0.8）留一丝过冲作为灵动岛的「活气」；
+/// 动效降级不靠参数硬调，而是换一组参数：完整动效用轻微欠阻尼（ζ=0.75）留一丝过冲作为灵动岛的「活气」；
 /// 降级动效换临界阻尼（ζ=1）且刚度更高，不过冲、收敛更快；即时动效由调用方直接跳到目标值，根本不进积分。
+/// 刚度与阻尼本身来自 <see cref="IslandMotionTuning"/>，也就是那份可热重载的手感参数文件——这里只留
+/// 「建好后改不改」的能力，不再把数值写死在代码里。
 /// </remarks>
 public sealed class SpringMotion
 {
-    /// <summary>完整动效的刚度（1/s²）。对应角频率约 23.2 rad/s。</summary>
-    public const double FullStiffness = 540d;
+    /// <summary>刚度与阻尼都没给时用的兜底参数。取完整档的默认值，好过让除零或发散发生在这里。</summary>
+    public const double DefaultStiffness = 400d;
 
-    /// <summary>
-    /// 完整动效的阻尼（1/s），等于 0.8 × 2√(FullStiffness)，即 ζ = 0.8。
-    /// 取这个值是因为窗高不自重：190 DIP 的行程上 ζ=0.65 会过冲 13 DIP 再回落，看过去是明显的回弹而非
-    /// 「活气」。落到 0.8 只剩约 1.5%（约 2.9 DIP）——足以看出不是线性补间，又不至于看成弹跳，
-    /// 同时把整段拖到完全静止的时间从约 0.63 s 压到约 0.41 s。
-    /// Full damping (1/s), i.e. 0.8 × 2√(FullStiffness), giving ζ = 0.8. The value is chosen because a window
-    /// height carries no visible weight: on a 190 DIP throw ζ=0.65 overshoots 13 DIP and settles back, reading as
-    /// a bounce rather than liveliness. At 0.8 only ~1.5% (~2.9 DIP) is left — enough to show the motion is not a
-    /// linear tween, little enough not to read as a spring — and full rest drops from ~0.63 s to ~0.41 s.
-    /// </summary>
-    public const double FullDamping = 37.2d;
-
-    /// <summary>降级动效的刚度（1/s²）：收敛更快，配合临界阻尼几乎不产生过冲。</summary>
-    public const double ReducedStiffness = 520d;
-
-    /// <summary>降级动效的阻尼（1/s），等于 2√(ReducedStiffness)，即临界阻尼。</summary>
-    public const double ReducedDamping = 45.6d;
+    /// <summary>刚度与阻尼都没给时用的兜底参数，取 ζ = 0.75 的比例。</summary>
+    public const double DefaultDamping = 30d;
 
     /// <summary>位置判定静止的阈值（DIP）：小于半个像素，肉眼不可见。</summary>
     public const double RestPositionDip = 0.1d;
@@ -61,17 +48,37 @@ public sealed class SpringMotion
         // A fresh spring already sits on its target and must read as settled: otherwise the window would start
         // chasing a target equal to its current height the moment it is created.
         IsSettled = true;
-        _stiffness = stiffness > 0d ? stiffness : FullStiffness;
-        _damping = damping > 0d ? damping : FullDamping;
+        _stiffness = stiffness > 0d ? stiffness : DefaultStiffness;
+        _damping = damping > 0d ? damping : DefaultDamping;
     }
 
-    /// <summary>按当前动效级别创建弹簧。 / Creates a spring suited to the given motion profile.</summary>
+    /// <summary>
+    /// 换一组刚度与阻尼，用于参数热重载。位置、速度与目标都不动：正在跑的动画应当带着当前速度改用新参数，
+    /// 而不是从头起步——后者会让一次改参数的动作本身变成一次可见的跳变。
+    /// Swaps stiffness and damping, for a hot reload of the tuning. Position, velocity and target are untouched: an
+    /// animation already in flight carries its current velocity onto the new parameters instead of restarting, since
+    /// restarting would turn the parameter change itself into a visible jump.
+    /// </summary>
+    /// <param name="stiffness">新刚度（1/s²）。 / The new stiffness.</param>
+    /// <param name="damping">新阻尼（1/s）。 / The new damping.</param>
+    public void Retune(double stiffness, double damping)
+    {
+        if (stiffness > 0d)
+            _stiffness = stiffness;
+        if (damping > 0d)
+            _damping = damping;
+    }
+
+    /// <summary>按当前动效级别创建弹簧，参数取自那份可热重载的手感表。 / Creates a spring for a motion tier, using the hot-reloadable feel table.</summary>
     /// <param name="profile">当前环境动效级别。 / Motion level of the current environment.</param>
     /// <param name="position">起始高度（DIP）。 / Starting height in DIP.</param>
     public static SpringMotion ForProfile(MotionProfile profile, double position) =>
         profile.Mode == MotionMode.Reduced
-            ? new SpringMotion(position, ReducedStiffness, ReducedDamping)
-            : new SpringMotion(position, FullStiffness, FullDamping);
+            ? Create(IslandMotionTuning.Current.ReducedStiffness, IslandMotionTuning.Current.ReducedDamping, position)
+            : Create(IslandMotionTuning.Current.FullStiffness, IslandMotionTuning.Current.FullDamping, position);
+
+    private static SpringMotion Create(double stiffness, double damping, double position) =>
+        new(position, stiffness > 0d ? stiffness : DefaultStiffness, damping > 0d ? damping : DefaultDamping);
 
     /// <summary>当前值（DIP）。 / Current value in DIP.</summary>
     public double Position { get; private set; }
