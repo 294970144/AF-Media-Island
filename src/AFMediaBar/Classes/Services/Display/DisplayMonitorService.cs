@@ -138,7 +138,10 @@ public sealed class DisplayMonitorService : IDisplayMonitorService
                 bounds.Top,
                 bounds.Right - bounds.Left,
                 bounds.Bottom - bounds.Top);
-            return ForegroundFullscreenPolicy.IsFullscreen(windowBounds, monitor.monitorArea);
+            return ForegroundFullscreenPolicy.IsFullscreen(
+                windowBounds,
+                monitor.monitorArea,
+                NativeMethods.IsZoomed(foreground));
         }
         catch (Exception exception)
         {

@@ -200,7 +200,15 @@ public sealed class AppSettings : INotifyPropertyChanged
         if (!Enum.IsDefined(result.TrayWheelBehavior)) result.TrayWheelBehavior = defaults.TrayWheelBehavior;
         result.LyricsSecondaryLine = result.LyricsSecondaryLine.Normalize();
         if (!Enum.IsDefined(result.Position)) result.Position = defaults.Position;
-        result.WindowMode = WindowMode.Taskbar;
+        // 窗口模式是用户挑出来的运行模式，不能在这里抹平。原先无条件写回 Taskbar，等于每次读档都把
+        // 用户的「灵动岛」选择扔掉——那不是清洗，是把这个设置唯一的写入路径悄无声息地作废。
+        // Window mode is the running mode the user picked; flattening it here is wrong. It used to be written back to
+        // Taskbar unconditionally, which silently discarded a "dynamic island" choice on every load: that is not
+        // sanitising, it is voiding the only write path that setting had.
+        // 只有取值超出枚举范围（手改过的配置文件、或未来版本删掉某个模式）才回落到默认值。
+        // Only a value outside the enum range (a hand-edited settings file, or a mode a future version removed)
+        // falls back to the default.
+        if (!Enum.IsDefined(result.WindowMode)) result.WindowMode = defaults.WindowMode;
         if (!Enum.IsDefined(result.LayoutOrientationMode)) result.LayoutOrientationMode = defaults.LayoutOrientationMode;
         if (!Enum.IsDefined(result.DynamicIslandBackgroundMode)) result.DynamicIslandBackgroundMode = defaults.DynamicIslandBackgroundMode;
         if (!Enum.IsDefined(result.DynamicIslandEdge)) result.DynamicIslandEdge = defaults.DynamicIslandEdge;

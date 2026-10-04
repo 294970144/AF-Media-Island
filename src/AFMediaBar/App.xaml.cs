@@ -195,6 +195,12 @@ namespace AFMediaBar
                 services.AddSingleton<Func<TrackChangeNotificationWindow>>(sp =>
                     () => sp.GetRequiredService<TrackChangeNotificationWindow>());
 
+                // === 实验性灵动岛（--island 启动 / 显示模式页选择） Experimental island (--island / display-modes page) ===
+                services.AddTransient<IslandWindowViewModel>();
+                services.AddTransient<IslandWindow>();
+                services.AddSingleton<Func<IslandWindow>>(sp => () => sp.GetRequiredService<IslandWindow>());
+                services.AddSingleton<IslandPresentationCoordinator>();
+
                 // === 设置页面及其 ViewModel Settings Pages and ViewModels ===
                 services.AddSingleton<AppearancePage>();
                 services.AddSingleton<AppearanceViewModel>();
@@ -283,6 +289,13 @@ namespace AFMediaBar
             var settingsPersistenceService = Services.GetRequiredService<SettingsPersistenceService>();
             settingsPersistenceService.Initialize();
 
+            // 灵动岛手感参数与设置文件同目录，读它只为拿到弹簧与悬停延迟的初值，并开始监听后续改动。
+            // 放在设置之后、宿主之前：岛窗在宿主里构造，它读的就是这份表。
+            // The island's feel parameters sit beside the settings file; reading them only seeds the spring and hover
+            // delays and starts watching for later edits. It runs after the settings and before the host, because the
+            // island window is built inside the host and reads this table.
+            IslandMotionTuning.Initialize();
+
             // 「我的默认设置」快照必须在宿主启动前装载：设置页上的「恢复默认设置」在用户点下去的那一刻就要
             // 回到用户自己的默认值，而不是等下一次启动才生效。
             // The user-defaults snapshot has to be loaded before the host starts: a "restore defaults" click must land on the
@@ -356,6 +369,19 @@ namespace AFMediaBar
             // Background pruning starts last: it can only judge "is anything playing" once the media session catalog is up, and its power message
             // window has to be created on the UI thread, which is also the thread every SystemEvents callback is marshalled back to.
             Services.GetRequiredService<MemoryPruneCoordinator>().Start();
+
+            // 实验性「灵动岛」原型的入口有两个，且落的是同一个协调器实例：命令行 --island 是开发时的临时开关；
+            // 存档里 WindowMode == DynamicIsland 则是用户在显示模式页挑出来、跨会话要记住的选择。
+            // 两者都走协调器而不是直接解析窗口：设置页唤起的是同一个实例，不会叠出两个岛。
+            // The experimental island prototype has two entry points, both going through the same coordinator instance:
+            // the --island command line is a temporary developer switch, while a stored WindowMode == DynamicIsland is the
+            // choice the user made on the display-modes page and expects to survive restarts. Neither constructs the
+            // window directly, so the settings page cannot stack a second island.
+            if (e.Args.Any(arg => string.Equals(arg, "--island", StringComparison.OrdinalIgnoreCase)) ||
+                SettingsManager.Current.WindowMode == AFMediaBar.Classes.Models.Layout.WindowMode.DynamicIsland)
+            {
+                Services.GetRequiredService<IslandPresentationCoordinator>().Show();
+            }
 
 #if DEBUG
             _debugLyricsDiagnostics = new DebugLyricsDiagnostics();

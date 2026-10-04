@@ -96,6 +96,13 @@ public static partial class NativeMethods
     public const int S_OK = 0;
     public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
+    // DWM 窗口描边。Windows 11 会给无边框窗口画一圈跟随系统强调色的细线（深色主题下常见为深绿），
+    // 传 DWMWA_COLOR_NONE 让 DWM 不再画它。
+    // DWM window border. Windows 11 draws a thin outline around frameless windows that follows the system accent
+    // color (often dark green in dark themes); DWMWA_COLOR_NONE tells DWM to stop drawing it.
+    public const int DWMWA_BORDER_COLOR = 34;
+    public const int DWMWA_COLOR_NONE = -1;
+
     // GDI region
     public const int RGN_OR = 2;
 
@@ -344,6 +351,17 @@ public static partial class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool IsIconic(IntPtr hWnd);
 
+    /// <summary>
+    /// 判断窗口是否处于「最大化」状态。这是把最大化与全屏区分开的唯一可靠信号：二者的窗口矩形在
+    /// 无任务栏的显示器上完全相同（都等于整块屏幕），几何上无从分辨。
+    /// Determines whether a window is maximized. This is the only reliable way to tell maximized from fullscreen:
+    /// on a display with no taskbar both have window rectangles identical to the whole screen, so geometry
+    /// alone cannot separate them.
+    /// </summary>
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool IsZoomed(IntPtr hWnd);
+
     [LibraryImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
     public static partial int GetWindowLong(IntPtr hWnd, int nIndex);
 
@@ -515,8 +533,16 @@ public static partial class NativeMethods
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RECT value, int valueSize);
 
+    /// <summary>设置 DWM 窗口属性；用于取消 Windows 11 给无边框窗口画的系统色描边。 / Sets a DWM window attribute, used to drop the system-colored outline Windows 11 draws around frameless windows.</summary>
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int valueSize);
+
     [LibraryImport("gdi32.dll")]
     public static partial IntPtr CreateRectRgn(int left, int top, int right, int bottom);
+
+    /// <summary>创建圆角矩形区域；成功交给 SetWindowRgn 后所有权归系统，调用方不得 DeleteObject。 / Creates a rounded-rect region; once handed to SetWindowRgn the system owns it — never DeleteObject it then.</summary>
+    [LibraryImport("gdi32.dll")]
+    public static partial IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int ellipseWidth, int ellipseHeight);
 
     /// <summary>读取设备上下文中指定像素的 COLORREF 值。/ Reads the COLORREF value of a pixel in a device context.</summary>
     [LibraryImport("gdi32.dll")]
